@@ -16,3 +16,8 @@ bench = false
 runtime = { path = "../../library/runtime" }
 terminal = { path = "../../library/terminal" }
 concurrent = { path = "../../library/concurrent" }
+spin = "0.9"
+capnp = { version = "0.13", default-features = false }
+
+[build-dependencies]
+capnpc = "0.13"
