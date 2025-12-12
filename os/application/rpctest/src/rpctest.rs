@@ -9,6 +9,7 @@ use capnp::message::{Builder, Reader, ReaderOptions, SegmentArray};
 #[allow(unused_imports)]
 use runtime::*;
 use terminal::println;
+use rpc::HelloClient;
 
 
 pub mod mydata_capnp {
@@ -20,6 +21,14 @@ static SHARED_BYTES: Mutex<[u8; 512]> = Mutex::new([0u8; 512]);
 static READY: Mutex<bool> = Mutex::new(false);
 
 pub fn writer_capnp() {
+    // Call the simple HelloClient::say_hello for demonstration
+    let client = HelloClient {};
+    println!("Calling say_hello from writer...");
+    match client.say_hello("Hallo vom writer") {
+        Ok(resp) => println!("say_hello returned: {}", resp),
+        Err(_) => println!("say_hello failed"),
+    }
+
     let mut msg = Builder::new_default();
 
     {

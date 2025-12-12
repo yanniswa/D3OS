@@ -1,0 +1,17 @@
+[package]
+name = "rpc"
+version = "0.1.0"
+edition = "2024"
+authors = ["Yannis Wagner <yannis.wagner@hhu.de>"]
+
+[lib]
+test = false
+doctest = false
+bench = false
+
+[features]
+
+
+[dependencies]
+capnp = { version = "0.13", default-features = false }
+
