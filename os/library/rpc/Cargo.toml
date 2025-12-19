@@ -10,8 +10,14 @@ doctest = false
 bench = false
 
 [features]
-
+default = ["userspace"]
+userspace = []
 
 [dependencies]
 capnp = { version = "0.13", default-features = false }
+naming = { path = "../../library/naming" }
+syscall = { path = "../../library/syscall" }
+terminal = { path = "../../library/terminal" }
+concurrent = { path = "../../library/concurrent" }
+log = "0.4.26"
 

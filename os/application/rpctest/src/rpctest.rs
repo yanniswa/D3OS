@@ -2,30 +2,45 @@
 
 extern crate alloc;
 
-use alloc::{string::{String, ToString}, sync::Arc, vec::Vec};
-use concurrent::{process, thread};
-use spin::Mutex;
+use alloc::{
+    string::{String, ToString},
+    sync::Arc,
+    vec::Vec,
+};
 use capnp::message::{Builder, Reader, ReaderOptions, SegmentArray};
+use concurrent::{process, thread};
+use naming::mkfifo;
+use rpc::HelloClient;
+use rpc::PipeTransport;
+use rpc::server;
 #[allow(unused_imports)]
 use runtime::*;
+use spin::Mutex;
 use terminal::println;
-use rpc::HelloClient;
-
 
 pub mod mydata_capnp {
     include!("../mydata_capnp.rs");
 }
-
 
 static SHARED_BYTES: Mutex<[u8; 512]> = Mutex::new([0u8; 512]);
 static READY: Mutex<bool> = Mutex::new(false);
 
 pub fn writer_capnp() {
     // Call the simple HelloClient::say_hello for demonstration
-    let client = HelloClient {};
+    // spawn a simple pipe-based server in a thread for local testing
+    // ensure /rpc directory and request fifo exist before spawning server
+
+    // connect transport to request pipe and client reply pipe
+    let client = HelloClient::new(PipeTransport::new());
+    let request = "Hallo vom writer";
     println!("Calling say_hello from writer...");
-    match client.say_hello("Hallo vom writer") {
-        Ok(resp) => println!("say_hello returned: {}", resp),
+    println!("RPC request payload: '{}'", request);
+
+    match client.say_hello(request) {
+        Ok(resp) => {
+            println!("say_hello returned: {}", resp);
+            println!("RPC response (raw bytes): {:?}", resp.as_bytes());
+        }
         Err(_) => println!("say_hello failed"),
     }
 
@@ -38,7 +53,6 @@ pub fn writer_capnp() {
         root.set_c("Hallo OS!");
     }
 
-    
     let mut buffer = SHARED_BYTES.lock();
     let cursor = &mut buffer[..];
 
@@ -47,20 +61,15 @@ pub fn writer_capnp() {
     *READY.lock() = true;
 }
 
-
 pub fn reader_capnp() -> Result<(u32, u64, String), capnp::Error> {
     while !*READY.lock() {}
 
     let buffer = SHARED_BYTES.lock();
     let slice: &[u8] = &buffer[..];
 
- 
     let mut cursor = slice;
 
-    let reader = capnp::serialize::read_message(
-        &mut cursor,
-        ReaderOptions::new(),
-    )?;
+    let reader = capnp::serialize::read_message(&mut cursor, ReaderOptions::new())?;
 
     let root = reader.get_root::<mydata_capnp::my_data::Reader>()?;
 
@@ -70,9 +79,6 @@ pub fn reader_capnp() -> Result<(u32, u64, String), capnp::Error> {
 
     Ok((a, b, c))
 }
-
-
-
 
 #[unsafe(no_mangle)]
 fn main() {

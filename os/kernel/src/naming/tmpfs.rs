@@ -349,7 +349,7 @@ impl Pipe {
 
 impl PipeObject for Pipe {
     fn open(&self, _flags: OpenOptions) -> Result<usize, Errno> {
-        Err(Errno::EBADF)
+        Ok(0)
     }
 
     fn stat(&self) -> Result<Stat, Errno> {

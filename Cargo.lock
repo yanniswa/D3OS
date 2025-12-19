@@ -1252,6 +1252,11 @@ name = "rpc"
 version = "0.1.0"
 dependencies = [
  "capnp",
+ "concurrent",
+ "log",
+ "naming",
+ "syscall",
+ "terminal",
 ]
 
 [[package]]
@@ -1261,9 +1266,11 @@ dependencies = [
  "capnp",
  "capnpc",
  "concurrent",
+ "naming",
  "rpc",
  "runtime",
  "spin 0.9.8",
+ "syscall",
  "terminal",
 ]
 
