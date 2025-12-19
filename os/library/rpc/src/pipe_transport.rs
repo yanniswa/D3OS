@@ -18,6 +18,7 @@ use crate::server::RPCServer;
 /// The server must read the reply_path and send the response to it as
 /// [u32 resp_len][resp_bytes]
 use crate::transport::Transport;
+use core::cmp::min;
 
 pub struct PipeTransport {}
 
@@ -41,47 +42,56 @@ fn writer_thread(msg: &[u8]) -> Option<Result<(), i32>> {
         return Some(Err(res.unwrap_err() as i32));
     }
     let fh = res.unwrap();
-    println!("writer_thread: opened fh={}", fh);
-    // Write the message one byte at a time, similar to `pipetest::writer_thread`.
-    // This produces clearer per-byte logs and matches the test pattern used
-    // elsewhere in the repo.
-    let mut off = 0usize;
-    let mut cnt: u32 = 0;
-    while off < msg.len() {
-        let b: u8 = msg[off];
-        let wbuff: [u8; 1] = [b];
-        let res = write(fh, &wbuff);
-        if res.is_err() {
-            println!("writer_thread: write failed, error: {:?}", res);
-        } else {
-            let n = res.unwrap();
-            if wbuff[0].is_ascii() {
-                println!("writer_thread: wrote one byte = '{}'", wbuff[0] as char);
-            } else {
-                println!("writer_thread: wrote one non-ascii byte, read = {}", n);
+
+    // Write a 4-byte little-endian length prefix followed by the payload in
+    // larger chunks. This prevents huge numbers of syscalls and avoids the
+    // visual "infinite write" caused by byte-per-byte logging.
+    let total_len = msg.len();
+    let len_be = (total_len as u32).to_le_bytes();
+
+    // Helper to write a full buffer (may require multiple write() calls).
+    let mut write_full = |buf: &[u8]| -> Result<usize, i32> {
+        let mut off = 0usize;
+        while off < buf.len() {
+            match write(fh, &buf[off..]) {
+                Ok(n) if n > 0 => off += n,
+                Ok(0) => return Err(-5), // treat 0 as broken pipe / unexpected
+                Err(e) => return Err(e as i32),
+                _ => return Err(-6),
             }
-            off += n;
         }
-        cnt += 1;
-        // Optional safety: prevent extremely long loops if something goes wrong
-        if cnt > (msg.len() as u32 * 8) {
-            println!("writer_thread: too many iterations, aborting");
-            break;
+        Ok(off)
+    };
+
+    if let Err(e) = write_full(&len_be) {
+        println!("writer_thread: failed to write length prefix: {:?}", e);
+        let _ = close(fh);
+        return Some(Err(e));
+    }
+
+    // Write payload in chunks
+    let chunk_size = 256usize;
+    let mut off = 0usize;
+    while off < total_len {
+        let end = min(off + chunk_size, total_len);
+        let chunk = &msg[off..end];
+        match write_full(chunk) {
+            Ok(n) => off += n,
+            Err(e) => {
+                println!("writer_thread: write chunk failed: {:?}", e);
+                let _ = close(fh);
+                return Some(Err(e));
+            }
         }
     }
 
     println!("writer_thread: send complete, {} bytes written", off);
-    //TODO in den Server schieben
 
-    // write all bytes
-
-    // close the write handle
-    //question schließt das hier schon die pipe?
-    //answer
     match close(fh) {
         Ok(_) => println!("writer_thread: closed fh={}", fh),
         Err(e) => println!("writer_thread: close failed fh={} err={:?}", fh, e),
     }
+
     None
 }
 //TODO: mkfifo darf nicht in send passieren, bei mehrfachen send Aufruf --> problem

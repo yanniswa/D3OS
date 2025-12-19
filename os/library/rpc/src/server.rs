@@ -5,12 +5,17 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
+use capnp::message::ReaderOptions;
+use capnp::serialize;
 use concurrent::thread;
 use core::str;
 use core::sync::atomic::{AtomicBool, Ordering};
 use naming::shared_types::OpenOptions;
 use naming::{close, mkfifo, open, read, write};
 use terminal::println;
+pub mod hello_capnp {
+    include!("./hello_capnp.rs");
+}
 pub struct RPCServer {}
 
 // Module-level atomic flag indicating whether the RPC server has been started.
@@ -86,57 +91,78 @@ impl RPCServer {
         }
         let fh = res.unwrap();
         println!("server_thread (tid={}): start reading", thread.id());
-        // Read up to 16 bytes from the request pipe in a byte-wise loop
-        // similar to `pipetest::reader_thread`. This protects against
-        // partial reads and prevents indefinite blocking by using an
-        // iteration cap.
-        let expected_len = 16usize;
-        let mut buf = vec![0u8; expected_len];
-        let mut total = 0usize;
-        let mut cnt = 0usize;
-        let max_iters = expected_len * 4; // safety cap
-
-        while total < expected_len && cnt < max_iters {
-            let mut one = [0u8; 1];
-
-            let res = read(fh, &mut one);
-            match res {
-                Ok(n) => {
-                    if n == 0 {
-                        println!("server_thread: read returned 0 bytes (EOF)");
-                    } else {
-                        buf[total] = one[0];
-                        total += n;
-                        if one[0].is_ascii() {
-                            //      println!("server_thread: read one byte '{}', read = {}", one[0] as char, n);
-                        } else {
-                            println!("server_thread: read one non-ascii byte, read = {}", n);
-                        }
-                    }
+        // First read a 4-byte little-endian length prefix, then read the
+        // payload of that exact length. This matches the writer which sends
+        // a u32 length before the Cap'n Proto bytes.
+        let mut len_buf = [0u8; 4];
+        let mut off = 0usize;
+        while off < 4 {
+            match read(fh, &mut len_buf[off..4]) {
+                Ok(n) if n > 0 => off += n,
+                Ok(0) => {
+                    println!("server_thread: unexpected EOF while reading length");
+                    let _ = close(fh);
+                    return Ok(());
                 }
                 Err(e) => {
-                    println!("server_thread: read failed, error: {:?}", e);
+                    println!("server_thread: read(length) failed: {:?}", e);
+                    let _ = close(fh);
+                    return Err(e as i32);
+                }
+                _ => {
+                    println!("server_thread: unknown read result while reading length");
+                    let _ = close(fh);
+                    return Err(-1);
                 }
             }
-            cnt += 1;
         }
 
-        if total == 0 {
-            // nothing to process
-            let _ = close(fh);
-            return Ok(());
+        let payload_len = u32::from_le_bytes(len_buf) as usize;
+        println!("server_thread: incoming payload length = {}", payload_len);
+
+        let mut buf = vec![0u8; payload_len];
+        let mut got = 0usize;
+        while got < payload_len {
+            match read(fh, &mut buf[got..]) {
+                Ok(n) if n > 0 => got += n,
+                Ok(0) => {
+                    println!("server_thread: unexpected EOF while reading payload");
+                    break;
+                }
+                Err(e) => {
+                    println!("server_thread: read(payload) failed: {:?}", e);
+                    let _ = close(fh);
+                    return Err(e as i32);
+                }
+                _ => {
+                    println!("server_thread: unknown read result while reading payload");
+                    let _ = close(fh);
+                    return Err(-2);
+                }
+            }
         }
 
-        // Interpret what we have as UTF-8 (best-effort) and print greeting.
-        let name = match str::from_utf8(&buf[..total]) {
-            Ok(s) => s,
-            Err(_) => "<invalid-utf8>",
-        };
-        let mut greeting = String::from("Hello ");
-        greeting.push_str(name);
-        println!("Greetings: {}", greeting);
+        println!("server_thread: read payload bytes = {}", got);
 
-        // Close the request pipe handle and finish.
+        // Try to parse the payload as a Cap'n Proto message using the
+        // byte-oriented API: `read_message_from_flat_slice` expects a
+        // `&mut &[u8]` pointing to the flat slice of bytes.
+        if got == 0 {
+            println!("server_thread: empty payload");
+        } else {
+            let mut slice: &[u8] = &buf[..got];
+            match serialize::read_message_from_flat_slice(&mut slice, ReaderOptions::new()) {
+                Ok(message_reader) => match message_reader.get_root::<hello_capnp::hello_request::Reader>() {
+                    Ok(req) => match req.get_name() {
+                        Ok(name) => println!("capnp: HelloRequest.name = {}", name),
+                        Err(_) => println!("capnp: HelloRequest.name missing or invalid"),
+                    },
+                    Err(e) => println!("capnp: get_root failed: {:?}", e),
+                },
+                Err(e) => println!("capnp: read_message_from_flat_slice failed: {:?}", e),
+            }
+        }
+
         let _ = close(fh);
 
         Ok(())

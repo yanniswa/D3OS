@@ -1252,6 +1252,7 @@ name = "rpc"
 version = "0.1.0"
 dependencies = [
  "capnp",
+ "capnpc",
  "concurrent",
  "log",
  "naming",

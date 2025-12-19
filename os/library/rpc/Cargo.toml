@@ -21,3 +21,6 @@ terminal = { path = "../../library/terminal" }
 concurrent = { path = "../../library/concurrent" }
 log = "0.4.26"
 
+[build-dependencies]
+capnpc = "0.13"
+
