@@ -153,10 +153,24 @@ impl RPCServer {
             let mut slice: &[u8] = &buf[..got];
             match serialize::read_message_from_flat_slice(&mut slice, ReaderOptions::new()) {
                 Ok(message_reader) => match message_reader.get_root::<hello_capnp::hello_request::Reader>() {
-                    Ok(req) => match req.get_name() {
-                        Ok(name) => println!("capnp: HelloRequest.name = {}", name),
-                        Err(_) => println!("capnp: HelloRequest.name missing or invalid"),
-                    },
+                    Ok(req) => {
+                        // Debug: check whether the reply_path field is present
+                        if req.has_reply_path() {
+                            match req.get_reply_path() {
+                                Ok(path) => println!("capnp: HelloRequest.reply_path = {}", path),
+                                Err(_) => println!("capnp: HelloRequest.reply_path present but invalid"),
+                            }
+                        } else {
+                            println!("capnp: HelloRequest has no reply_path field set");
+                        }
+                        // Also log name if present
+                        if req.has_name() {
+                            match req.get_name() {
+                                Ok(n) => println!("capnp: HelloRequest.name = {}", n),
+                                Err(_) => println!("capnp: HelloRequest.name invalid"),
+                            }
+                        }
+                    }
                     Err(e) => println!("capnp: get_root failed: {:?}", e),
                 },
                 Err(e) => println!("capnp: read_message_from_flat_slice failed: {:?}", e),

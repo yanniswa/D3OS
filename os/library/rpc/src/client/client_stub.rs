@@ -2,6 +2,8 @@ use crate::transport::Transport;
 extern crate alloc;
 use alloc::string::String;
 use core::str;
+use naming::mkfifo;
+use terminal::println;
 
 use capnp::message::Builder;
 use capnp::serialize;
@@ -41,11 +43,17 @@ impl<T: Transport> HelloClient<T> {
         */
         // Build a Cap'n Proto message for the request using the generated schema.
         // The generated code will be available as `hello_capnp` (via build.rs).
-
+        const reply_path: &str = "/myrpcpipereply";
+        let res = mkfifo(reply_path);
+        if res.is_err() {
+            println!("mkfifo failed for reply, error: {:?}", res);
+        }
+        println!("mkfifo for reply: ok");
         let mut message = Builder::new_default();
         {
             let mut root = message.init_root::<hello_capnp::hello_request::Builder>();
             root.set_name(name);
+            root.set_reply_path(reply_path);
         }
 
         // Serialize message into words and reinterpret as bytes
