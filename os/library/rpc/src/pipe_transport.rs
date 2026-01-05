@@ -34,14 +34,24 @@ fn pipe_server_runner() {
 }
 fn writer_thread(msg: &[u8]) -> Option<Result<(), i32>> {
     let thread = thread::current().unwrap();
-    println!("writer_thread (tid={}): start", thread.id());
+    // Include process id (if available) and thread id in logs for tracing
+    let pid = concurrent::process::current().map(|p| p.id()).unwrap_or(0);
+    println!("writer_thread (pid={} tid={}): start", pid, thread.id());
 
     let res = open("/myrpcpiperequest", OpenOptions::WRITEONLY);
     if res.is_err() {
-        println!("writer_thread: open failed, error: {:?}", res);
+        println!("writer_thread (pid={} tid={}): open failed, error: {:?}", pid, thread.id(), res);
         return Some(Err(res.unwrap_err() as i32));
     }
     let fh = res.unwrap();
+    if fh == 0 {
+        println!(
+            "writer_thread (pid={} tid={}): WARNING: open returned fh=0 - possible fd reuse?",
+            pid,
+            thread.id()
+        );
+    }
+    println!("writer_thread (pid={} tid={}): opened fh={}", pid, thread.id(), fh);
 
     // Build a single contiguous buffer containing [len_prefix | payload].
     // If this buffer is <= PIPE_BUF the kernel will write it atomically
@@ -65,10 +75,22 @@ fn writer_thread(msg: &[u8]) -> Option<Result<(), i32>> {
         let mut off = 0usize;
         while off < buf.len() {
             match write(fh, &buf[off..]) {
-                Ok(n) if n > 0 => off += n,
-                Ok(0) => return Err(-5), // treat 0 as broken pipe / unexpected
-                Err(e) => return Err(e as i32),
-                _ => return Err(-6),
+                Ok(n) if n > 0 => {
+                    println!("writer_thread: write returned n={} off={}/{} fh={}", n, off, buf.len(), fh);
+                    off += n;
+                }
+                Ok(0) => {
+                    println!("writer_thread: write returned 0 (unexpected) off={}/{} fh={}", off, buf.len(), fh);
+                    return Err(-5);
+                }
+                Err(e) => {
+                    println!("writer_thread: write error: {:?} off={}/{} fh={}", e, off, buf.len(), fh);
+                    return Err(e as i32);
+                }
+                _ => {
+                    println!("writer_thread: write returned unknown result off={}/{} fh={}", off, buf.len(), fh);
+                    return Err(-6);
+                }
             }
         }
         Ok(off)
@@ -146,12 +168,156 @@ impl Transport for PipeTransport {
     }
 
     fn receive<'a>(&self, out: &'a mut [u8]) -> Result<usize, i32> {
-        // Dummy-Antwort: "Test" in den Ausgabepuffer kopieren und Länge zurückgeben
-        let data = b"Test";
-        if out.len() < data.len() {
-            return Err(-1); // Puffer zu klein
+        let thread = thread::current().unwrap();
+        let pid = concurrent::process::current().map(|p| p.id()).unwrap_or(0);
+
+        const REPLY_PATH: &str = "/myrpcpipereply";
+        println!("receive (pid={} tid={}): opening reply pipe: {}", pid, thread.id(), REPLY_PATH);
+
+        let res = open(REPLY_PATH, OpenOptions::READONLY);
+        if res.is_err() {
+            println!("receive (pid={} tid={}): open reply failed: {:?}", pid, thread.id(), res);
+            return Err(res.unwrap_err() as i32);
         }
-        out[..data.len()].copy_from_slice(data);
-        Ok(data.len())
+        let fh = res.unwrap();
+        println!("receive (pid={} tid={}): opened reply fh={}", pid, thread.id(), fh);
+
+        // Read 4-byte length prefix
+        let mut len_buf = [0u8; 4];
+        let mut off = 0usize;
+        while off < 4 {
+            match read(fh, &mut len_buf[off..]) {
+                Ok(n) if n > 0 => {
+                    println!("receive: read length n={} off={}/4", n, off);
+                    off += n;
+                }
+                Ok(0) => {
+                    if off > 0 {
+                        // Partial read - retry like server does
+                        let mut retries = 0usize;
+                        const MAX_RETRIES: usize = 8;
+                        println!("receive: partial EOF at off={}, retrying up to {} times", off, MAX_RETRIES);
+                        let mut got_something = false;
+                        while retries < MAX_RETRIES && off < 4 {
+                            match read(fh, &mut len_buf[off..]) {
+                                Ok(n) if n > 0 => {
+                                    println!("receive: retry read n={} off={}/4", n, off);
+                                    off += n;
+                                    got_something = true;
+                                    break;
+                                }
+                                Ok(0) => {
+                                    retries += 1;
+                                    thread::switch();
+                                    continue;
+                                }
+                                Err(e) => {
+                                    println!("receive: retry read error: {:?}", e);
+                                    let _ = close(fh);
+                                    return Err(e as i32);
+                                }
+                                _ => {
+                                    let _ = close(fh);
+                                    return Err(-3);
+                                }
+                            }
+                        }
+                        if !got_something && off < 4 {
+                            println!("receive: EOF persisted after {} retries", retries);
+                            let _ = close(fh);
+                            return Err(-2);
+                        }
+                    } else {
+                        println!("receive: EOF while reading length at start");
+                        let _ = close(fh);
+                        return Err(-2);
+                    }
+                }
+                Err(e) => {
+                    println!("receive: read length error: {:?}", e);
+                    let _ = close(fh);
+                    return Err(e as i32);
+                }
+                _ => {
+                    let _ = close(fh);
+                    return Err(-3);
+                }
+            }
+        }
+
+        let reply_len = u32::from_le_bytes(len_buf) as usize;
+        println!("receive (pid={} tid={}): reply length = {}", pid, thread.id(), reply_len);
+
+        if reply_len > out.len() {
+            println!("receive: reply too large ({} > {})", reply_len, out.len());
+            let _ = close(fh);
+            return Err(-4);
+        }
+
+        // Read reply payload
+        off = 0;
+        while off < reply_len {
+            match read(fh, &mut out[off..reply_len]) {
+                Ok(n) if n > 0 => {
+                    println!("receive: read payload n={} off={}/{}", n, off, reply_len);
+                    off += n;
+                }
+                Ok(0) => {
+                    if off > 0 {
+                        // Partial read - retry like server does
+                        let mut retries = 0usize;
+                        const MAX_RETRIES: usize = 8;
+                        println!("receive: partial EOF in payload at off={}/{}, retrying", off, reply_len);
+                        let mut got_something = false;
+                        while retries < MAX_RETRIES && off < reply_len {
+                            match read(fh, &mut out[off..reply_len]) {
+                                Ok(n) if n > 0 => {
+                                    println!("receive: retry payload n={} off={}/{}", n, off, reply_len);
+                                    off += n;
+                                    got_something = true;
+                                    break;
+                                }
+                                Ok(0) => {
+                                    retries += 1;
+                                    thread::switch();
+                                    continue;
+                                }
+                                Err(e) => {
+                                    println!("receive: retry payload error: {:?}", e);
+                                    let _ = close(fh);
+                                    return Err(e as i32);
+                                }
+                                _ => {
+                                    let _ = close(fh);
+                                    return Err(-6);
+                                }
+                            }
+                        }
+                        if !got_something && off < reply_len {
+                            println!("receive: EOF persisted in payload after {} retries", retries);
+                            let _ = close(fh);
+                            return Err(-5);
+                        }
+                    } else {
+                        println!("receive: EOF while reading payload at start");
+                        let _ = close(fh);
+                        return Err(-5);
+                    }
+                }
+                Err(e) => {
+                    println!("receive: read payload error: {:?}", e);
+                    let _ = close(fh);
+                    return Err(e as i32);
+                }
+                _ => {
+                    let _ = close(fh);
+                    return Err(-6);
+                }
+            }
+        }
+
+        println!("receive (pid={} tid={}): received {} bytes, closing fh={}", pid, thread.id(), reply_len, fh);
+        let _ = close(fh);
+        Ok(reply_len)
     }
 }

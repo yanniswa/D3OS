@@ -82,8 +82,10 @@ impl RPCServer {
     /// replies to client reply pipes indicated inside each framed request.
     pub fn run_pipe_server() -> Result<(), i32> {
         let thread = thread::current().unwrap();
+        let tid = thread.id();
+        let pid = concurrent::process::current().map(|p| p.id()).unwrap_or(0);
 
-        println!("server_thread (tid={}): start", thread.id());
+        println!("server_thread (tid={}): start", tid);
 
         // Persistent accept loop: open the request FIFO, read exactly one
         // framed request (length prefix + payload), process it, then close
@@ -93,23 +95,91 @@ impl RPCServer {
         loop {
             let res = open("/myrpcpiperequest", OpenOptions::READONLY);
             if res.is_err() {
-                println!("server_thread: open failed, error: {:?}", res);
+                println!("server_thread (pid={} tid={}): open failed, error: {:?}", pid, tid, res);
                 // yield / retry
                 let _ = thread::current();
                 continue;
             }
             let fh = res.unwrap();
-            println!("server_thread (tid={}): opened fh={} and waiting for request", thread.id(), fh);
+            if fh == 0 {
+                println!("server_thread (pid={} tid={}): WARNING: open returned fh=0 - possible fd reuse?", pid, tid);
+            }
+            println!("server_thread (pid={} tid={}): opened fh={} and waiting for request", pid, tid, fh);
 
             // read_exact helper: returns Err(0) on EOF, Err(n) on read error
             let mut read_exact = |buf: &mut [u8]| -> Result<(), i32> {
                 let mut off = 0usize;
                 while off < buf.len() {
                     match read(fh, &mut buf[off..]) {
-                        Ok(n) if n > 0 => off += n,
-                        Ok(0) => return Err(0),
-                        Err(e) => return Err(e as i32),
-                        _ => return Err(-1),
+                        Ok(n) if n > 0 => {
+                            println!("server_thread (tid={}): read returned n={} off={}/{} fh={}", tid, n, off, buf.len(), fh);
+                            off += n;
+                        }
+                        Ok(0) => {
+                            if off > 0 {
+                                // Partial read followed by EOF — retry a few times to allow
+                                // the writer to finish delivering the remaining bytes.
+                                let mut retries = 0usize;
+                                const MAX_RETRIES: usize = 8;
+                                println!(
+                                    "server_thread (tid={}): partial EOF (off={}), retrying up to {} times fh={}",
+                                    tid, off, MAX_RETRIES, fh
+                                );
+                                let mut got_something = false;
+                                while retries < MAX_RETRIES && off < buf.len() {
+                                    match read(fh, &mut buf[off..]) {
+                                        Ok(n) if n > 0 => {
+                                            println!("server_thread (tid={}): retry read returned n={} off={}/{} fh={}", tid, n, off, buf.len(), fh);
+                                            off += n;
+                                            got_something = true;
+                                            break;
+                                        }
+                                        Ok(0) => {
+                                            retries += 1;
+                                            // Yield CPU to give writer time to finish
+                                            thread::switch();
+                                            continue;
+                                        }
+                                        Err(e) => {
+                                            println!("server_thread (tid={}): retry read error: {:?} off={}/{} fh={}", tid, e, off, buf.len(), fh);
+                                            return Err(e as i32);
+                                        }
+                                        _ => {
+                                            println!("server_thread (tid={}): retry read unexpected off={}/{} fh={}", tid, off, buf.len(), fh);
+                                            return Err(-1);
+                                        }
+                                    }
+                                }
+                                if !got_something && off < buf.len() {
+                                    println!(
+                                        "server_thread (tid={}): EOF persisted after {} retries, partial off={}/{} fh={}",
+                                        tid,
+                                        retries,
+                                        off,
+                                        buf.len(),
+                                        fh
+                                    );
+                                    return Err(0);
+                                }
+                            } else {
+                                println!("server_thread (tid={}): read returned 0 (EOF) off={}/{} fh={}", tid, off, buf.len(), fh);
+                                return Err(0);
+                            }
+                        }
+                        Err(e) => {
+                            println!("server_thread (tid={}): read error: {:?} off={}/{} fh={}", tid, e, off, buf.len(), fh);
+                            return Err(e as i32);
+                        }
+                        _ => {
+                            println!(
+                                "server_thread (tid={}): read returned unexpected value off={}/{} fh={}",
+                                tid,
+                                off,
+                                buf.len(),
+                                fh
+                            );
+                            return Err(-1);
+                        }
                     }
                 }
                 Ok(())
@@ -120,71 +190,139 @@ impl RPCServer {
             match read_exact(&mut len_buf) {
                 Ok(()) => {}
                 Err(0) => {
-                    println!("server_thread: EOF while reading length, closing and retrying");
+                    println!("server_thread (tid={}): EOF while reading length, closing and retrying", tid);
                     let _ = close(fh);
                     continue;
                 }
                 Err(e) => {
-                    println!("server_thread: read(length) failed: {:?}", e);
+                    println!("server_thread (tid={}): read(length) failed: {:?}", tid, e);
                     let _ = close(fh);
                     return Err(e as i32);
                 }
             }
 
             let payload_len = u32::from_le_bytes(len_buf) as usize;
-            println!("server_thread: incoming payload length = {}", payload_len);
+            println!("server_thread (tid={}): incoming payload length = {}", tid, payload_len);
 
             if payload_len == 0 || payload_len > MAX_PAYLOAD {
-                println!("server_thread: invalid payload_len={}", payload_len);
+                println!("server_thread (tid={}): invalid payload_len={}", tid, payload_len);
                 let _ = close(fh);
                 continue;
             }
 
             let mut buf = vec![0u8; payload_len];
             match read_exact(&mut buf) {
-                Ok(()) => println!("server_thread: read payload bytes = {}", payload_len),
+                Ok(()) => println!("server_thread (tid={}): read payload bytes = {}", tid, payload_len),
                 Err(0) => {
-                    println!("server_thread: writer closed before payload complete, discarding and reopening");
+                    println!("server_thread (tid={}): writer closed before payload complete, discarding and reopening", tid);
                     let _ = close(fh);
                     continue;
                 }
                 Err(e) => {
-                    println!("server_thread: read(payload) failed: {:?}", e);
+                    println!("server_thread (tid={}): read(payload) failed: {:?}", tid, e);
                     let _ = close(fh);
                     return Err(e as i32);
                 }
+            }
+
+            // Diagnostic: hex dump of received payload for debugging
+            {
+                let preview_len = core::cmp::min(buf.len(), 32);
+                let mut s = String::new();
+                for b in &buf[..preview_len] {
+                    use core::fmt::Write as _;
+                    let _ = write!(&mut s, "{:02x}", b);
+                }
+                println!("server_thread (tid={}): payload hex ({} bytes) = {}", tid, preview_len, s);
             }
 
             // Try to parse the payload as a Cap'n Proto message using the
             // byte-oriented API: `read_message_from_flat_slice` expects a
             // `&mut &[u8]` pointing to the flat slice of bytes.
             if buf.len() == 0 {
-                println!("server_thread: empty payload");
+                println!("server_thread (tid={}): empty payload", tid);
             } else {
+                println!("server_thread (tid={}): attempting to parse {} bytes as capnp", tid, buf.len());
                 let mut slice: &[u8] = &buf[..];
                 match serialize::read_message_from_flat_slice(&mut slice, ReaderOptions::new()) {
-                    Ok(message_reader) => match message_reader.get_root::<hello_capnp::hello_request::Reader>() {
-                        Ok(req) => {
-                            // Debug: check whether the reply_path field is present
-                            if req.has_reply_path() {
-                                match req.get_reply_path() {
-                                    Ok(path) => println!("capnp: HelloRequest.reply_path = {}", path),
-                                    Err(_) => println!("capnp: HelloRequest.reply_path present but invalid"),
+                    Ok(message_reader) => {
+                        println!("server_thread (tid={}): capnp message parsed successfully", tid);
+                        let root_result = message_reader.get_root::<hello_capnp::hello_request::Reader>();
+                        println!("server_thread (tid={}): get_root() completed, now matching on result...", tid);
+                        match root_result {
+                            Ok(req) => {
+                                println!("server_thread (tid={}): got root as HelloRequest", tid);
+                                // Debug: check whether the reply_path field is present
+                                if req.has_reply_path() {
+                                    match req.get_reply_path() {
+                                        Ok(path) => println!("capnp: HelloRequest.reply_path = {}", path),
+                                        Err(e) => println!("capnp: HelloRequest.reply_path present but invalid: {:?}", e),
+                                    }
+                                } else {
+                                    println!("capnp (tid={}): HelloRequest has no reply_path field set", tid);
                                 }
-                            } else {
-                                println!("capnp: HelloRequest has no reply_path field set");
-                            }
-                            // Also log name if present
-                            if req.has_name() {
-                                match req.get_name() {
-                                    Ok(n) => println!("capnp: HelloRequest.name = {}", n),
-                                    Err(_) => println!("capnp: HelloRequest.name invalid"),
+                                // Also log name if present
+                                if req.has_name() {
+                                    match req.get_name() {
+                                        Ok(n) => println!("capnp (tid={}): HelloRequest.name = {}", tid, n),
+                                        Err(e) => println!("capnp (tid={}): HelloRequest.name invalid: {:?}", tid, e),
+                                    }
+                                } else {
+                                    println!("capnp (tid={}): HelloRequest has no name field set", tid);
+                                }
+
+                                // Send reply to client if reply_path is present
+                                if req.has_reply_path() {
+                                    if let Ok(reply_path) = req.get_reply_path() {
+                                        println!("server_thread (pid={} tid={}): opening reply pipe: {}", pid, tid, reply_path);
+                                        match open(reply_path, OpenOptions::WRITEONLY) {
+                                            Ok(reply_fh) => {
+                                                println!("server_thread (pid={} tid={}): opened reply_fh={}", pid, tid, reply_fh);
+
+                                                // Build reply message: "Hallo vom Server"
+                                                let reply_msg = b"Hallo vom Server";
+                                                let reply_len = (reply_msg.len() as u32).to_le_bytes();
+
+                                                // Build length-prefixed buffer
+                                                let mut reply_buf: Vec<u8> = Vec::with_capacity(4 + reply_msg.len());
+                                                reply_buf.extend_from_slice(&reply_len);
+                                                reply_buf.extend_from_slice(reply_msg);
+
+                                                // Write full buffer (similar to writer_thread)
+                                                let mut off = 0usize;
+                                                while off < reply_buf.len() {
+                                                    match naming::write(reply_fh, &reply_buf[off..]) {
+                                                        Ok(n) if n > 0 => {
+                                                            println!("server_thread: reply write n={} off={}/{}", n, off, reply_buf.len());
+                                                            off += n;
+                                                        }
+                                                        Ok(0) => {
+                                                            println!("server_thread: reply write returned 0");
+                                                            break;
+                                                        }
+                                                        Err(e) => {
+                                                            println!("server_thread: reply write error: {:?}", e);
+                                                            break;
+                                                        }
+                                                        _ => break,
+                                                    }
+                                                }
+
+                                                println!("server_thread (pid={} tid={}): reply sent, {} bytes written", pid, tid, off);
+                                                let _ = close(reply_fh);
+                                                println!("server_thread (pid={} tid={}): closed reply_fh={}", pid, tid, reply_fh);
+                                            }
+                                            Err(e) => {
+                                                println!("server_thread (pid={} tid={}): failed to open reply pipe: {:?}", pid, tid, e);
+                                            }
+                                        }
+                                    }
                                 }
                             }
+                            Err(e) => println!("capnp (tid={}): get_root failed: {:?}", tid, e),
                         }
-                        Err(e) => println!("capnp: get_root failed: {:?}", e),
-                    },
-                    Err(e) => println!("capnp: read_message_from_flat_slice failed: {:?}", e),
+                    }
+                    Err(e) => println!("capnp (tid={}): read_message_from_flat_slice failed: {:?}", tid, e),
                 }
             }
 
