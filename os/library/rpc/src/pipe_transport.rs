@@ -43,11 +43,22 @@ fn writer_thread(msg: &[u8]) -> Option<Result<(), i32>> {
     }
     let fh = res.unwrap();
 
-    // Write a 4-byte little-endian length prefix followed by the payload in
-    // larger chunks. This prevents huge numbers of syscalls and avoids the
-    // visual "infinite write" caused by byte-per-byte logging.
+    // Build a single contiguous buffer containing [len_prefix | payload].
+    // If this buffer is <= PIPE_BUF the kernel will write it atomically
+    // (avoiding interleaving with other writers). For larger buffers we
+    // still perform a full write loop, but interleaving between writers is
+    // possible for those sizes.
     let total_len = msg.len();
+    if total_len > (u32::MAX as usize) {
+        println!("writer_thread: payload too large {}", total_len);
+        let _ = close(fh);
+        return Some(Err(-1));
+    }
     let len_be = (total_len as u32).to_le_bytes();
+
+    let mut full_buf: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(4 + total_len);
+    full_buf.extend_from_slice(&len_be);
+    full_buf.extend_from_slice(msg);
 
     // Helper to write a full buffer (may require multiple write() calls).
     let mut write_full = |buf: &[u8]| -> Result<usize, i32> {
@@ -63,29 +74,43 @@ fn writer_thread(msg: &[u8]) -> Option<Result<(), i32>> {
         Ok(off)
     };
 
-    if let Err(e) = write_full(&len_be) {
-        println!("writer_thread: failed to write length prefix: {:?}", e);
-        let _ = close(fh);
-        return Some(Err(e));
+    // Try to perform the write. If the total message fits into PIPE_BUF,
+    // the kernel will perform it atomically which prevents interleaving
+    // with other writers. Otherwise we still write fully but other
+    // writers may interleave.
+    const PIPE_BUF: usize = 4096;
+    // Diagnostic: log overall len and a short hex preview of the buffer.
+    println!("writer_thread: full_buf.len() = {}", full_buf.len());
+    {
+        let preview_len = core::cmp::min(full_buf.len(), 16);
+        let mut s = String::new();
+        for b in &full_buf[..preview_len] {
+            use core::fmt::Write as _;
+            let _ = write!(&mut s, "{:02x}", b);
+        }
+        println!("writer_thread: preview ({} bytes) = {}", preview_len, s);
     }
 
-    // Write payload in chunks
-    let chunk_size = 256usize;
-    let mut off = 0usize;
-    while off < total_len {
-        let end = min(off + chunk_size, total_len);
-        let chunk = &msg[off..end];
-        match write_full(chunk) {
-            Ok(n) => off += n,
+    if full_buf.len() <= PIPE_BUF {
+        match write_full(&full_buf) {
+            Ok(n) => println!("writer_thread: atomic send complete, {} bytes written", n),
             Err(e) => {
-                println!("writer_thread: write chunk failed: {:?}", e);
+                println!("writer_thread: write failed: {:?}", e);
+                let _ = close(fh);
+                return Some(Err(e));
+            }
+        }
+    } else {
+        // For large messages, just use write_full (may be interleaved)
+        match write_full(&full_buf) {
+            Ok(n) => println!("writer_thread: send complete, {} bytes written", n),
+            Err(e) => {
+                println!("writer_thread: write failed: {:?}", e);
                 let _ = close(fh);
                 return Some(Err(e));
             }
         }
     }
-
-    println!("writer_thread: send complete, {} bytes written", off);
 
     match close(fh) {
         Ok(_) => println!("writer_thread: closed fh={}", fh),

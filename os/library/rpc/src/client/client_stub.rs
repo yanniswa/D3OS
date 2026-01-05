@@ -56,13 +56,27 @@ impl<T: Transport> HelloClient<T> {
             root.set_reply_path(reply_path);
         }
 
-        // Serialize message into words and reinterpret as bytes
+        // Serialize message into words and copy into a Vec<u8> so the bytes
+        // remain valid for the duration of the send. Copying also lets us
+        // build a single contiguous buffer for the transport to write.
         let words = serialize::write_message_to_words(&message);
         let bytes_len = words.len() * core::mem::size_of::<capnp::Word>();
-        let bytes: &[u8] = unsafe { core::slice::from_raw_parts(words.as_ptr() as *const u8, bytes_len) };
 
-        // Send the capnp bytes (transport will add the length-prefix)
-        self.transport.send(bytes)?;
+        if bytes_len == 0 {
+            self.transport.send(&[])?;
+        } else {
+            // Copy words into a byte vector safely by converting each Word
+            // into its native-endian byte representation. This avoids any
+            // unsafe pointer casts and the UB reported by `copy_nonoverlapping`.
+            let mut bytes_vec: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(bytes_len);
+            for &w in &words {
+                let b = w.to_ne_bytes();
+                bytes_vec.extend_from_slice(&b);
+            }
+
+            // Send the capnp bytes (transport will add the length-prefix)
+            self.transport.send(&bytes_vec)?;
+        }
 
         // receive response into a local buffer
         let mut out = [0u8; 2048];

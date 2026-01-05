@@ -11,7 +11,7 @@ use concurrent::thread;
 use core::str;
 use core::sync::atomic::{AtomicBool, Ordering};
 use naming::shared_types::OpenOptions;
-use naming::{close, mkfifo, open, read, write};
+use naming::{close, mkfifo, open, read};
 use terminal::println;
 pub mod hello_capnp {
     include!("./hello_capnp.rs");
@@ -84,102 +84,112 @@ impl RPCServer {
         let thread = thread::current().unwrap();
 
         println!("server_thread (tid={}): start", thread.id());
-        let res = open("/myrpcpiperequest", OpenOptions::READONLY);
-        if res.is_err() {
-            println!("server_thread: open failed, error: {:?}", res);
-            return Err(res.unwrap_err() as i32);
-        }
-        let fh = res.unwrap();
-        println!("server_thread (tid={}): start reading", thread.id());
-        // First read a 4-byte little-endian length prefix, then read the
-        // payload of that exact length. This matches the writer which sends
-        // a u32 length before the Cap'n Proto bytes.
-        let mut len_buf = [0u8; 4];
-        let mut off = 0usize;
-        while off < 4 {
-            match read(fh, &mut len_buf[off..4]) {
-                Ok(n) if n > 0 => off += n,
-                Ok(0) => {
-                    println!("server_thread: unexpected EOF while reading length");
+
+        // Persistent accept loop: open the request FIFO, read exactly one
+        // framed request (length prefix + payload), process it, then close
+        // and reopen. This avoids aborting if a writer closes early.
+        const MAX_PAYLOAD: usize = 64 * 1024; // 64 KiB sanity limit
+
+        loop {
+            let res = open("/myrpcpiperequest", OpenOptions::READONLY);
+            if res.is_err() {
+                println!("server_thread: open failed, error: {:?}", res);
+                // yield / retry
+                let _ = thread::current();
+                continue;
+            }
+            let fh = res.unwrap();
+            println!("server_thread (tid={}): opened fh={} and waiting for request", thread.id(), fh);
+
+            // read_exact helper: returns Err(0) on EOF, Err(n) on read error
+            let mut read_exact = |buf: &mut [u8]| -> Result<(), i32> {
+                let mut off = 0usize;
+                while off < buf.len() {
+                    match read(fh, &mut buf[off..]) {
+                        Ok(n) if n > 0 => off += n,
+                        Ok(0) => return Err(0),
+                        Err(e) => return Err(e as i32),
+                        _ => return Err(-1),
+                    }
+                }
+                Ok(())
+            };
+
+            // Read 4-byte length prefix
+            let mut len_buf = [0u8; 4];
+            match read_exact(&mut len_buf) {
+                Ok(()) => {}
+                Err(0) => {
+                    println!("server_thread: EOF while reading length, closing and retrying");
                     let _ = close(fh);
-                    return Ok(());
+                    continue;
                 }
                 Err(e) => {
                     println!("server_thread: read(length) failed: {:?}", e);
                     let _ = close(fh);
                     return Err(e as i32);
                 }
-                _ => {
-                    println!("server_thread: unknown read result while reading length");
-                    let _ = close(fh);
-                    return Err(-1);
-                }
             }
-        }
 
-        let payload_len = u32::from_le_bytes(len_buf) as usize;
-        println!("server_thread: incoming payload length = {}", payload_len);
+            let payload_len = u32::from_le_bytes(len_buf) as usize;
+            println!("server_thread: incoming payload length = {}", payload_len);
 
-        let mut buf = vec![0u8; payload_len];
-        let mut got = 0usize;
-        while got < payload_len {
-            match read(fh, &mut buf[got..]) {
-                Ok(n) if n > 0 => got += n,
-                Ok(0) => {
-                    println!("server_thread: unexpected EOF while reading payload");
-                    break;
+            if payload_len == 0 || payload_len > MAX_PAYLOAD {
+                println!("server_thread: invalid payload_len={}", payload_len);
+                let _ = close(fh);
+                continue;
+            }
+
+            let mut buf = vec![0u8; payload_len];
+            match read_exact(&mut buf) {
+                Ok(()) => println!("server_thread: read payload bytes = {}", payload_len),
+                Err(0) => {
+                    println!("server_thread: writer closed before payload complete, discarding and reopening");
+                    let _ = close(fh);
+                    continue;
                 }
                 Err(e) => {
                     println!("server_thread: read(payload) failed: {:?}", e);
                     let _ = close(fh);
                     return Err(e as i32);
                 }
-                _ => {
-                    println!("server_thread: unknown read result while reading payload");
-                    let _ = close(fh);
-                    return Err(-2);
+            }
+
+            // Try to parse the payload as a Cap'n Proto message using the
+            // byte-oriented API: `read_message_from_flat_slice` expects a
+            // `&mut &[u8]` pointing to the flat slice of bytes.
+            if buf.len() == 0 {
+                println!("server_thread: empty payload");
+            } else {
+                let mut slice: &[u8] = &buf[..];
+                match serialize::read_message_from_flat_slice(&mut slice, ReaderOptions::new()) {
+                    Ok(message_reader) => match message_reader.get_root::<hello_capnp::hello_request::Reader>() {
+                        Ok(req) => {
+                            // Debug: check whether the reply_path field is present
+                            if req.has_reply_path() {
+                                match req.get_reply_path() {
+                                    Ok(path) => println!("capnp: HelloRequest.reply_path = {}", path),
+                                    Err(_) => println!("capnp: HelloRequest.reply_path present but invalid"),
+                                }
+                            } else {
+                                println!("capnp: HelloRequest has no reply_path field set");
+                            }
+                            // Also log name if present
+                            if req.has_name() {
+                                match req.get_name() {
+                                    Ok(n) => println!("capnp: HelloRequest.name = {}", n),
+                                    Err(_) => println!("capnp: HelloRequest.name invalid"),
+                                }
+                            }
+                        }
+                        Err(e) => println!("capnp: get_root failed: {:?}", e),
+                    },
+                    Err(e) => println!("capnp: read_message_from_flat_slice failed: {:?}", e),
                 }
             }
+
+            let _ = close(fh);
         }
-
-        println!("server_thread: read payload bytes = {}", got);
-
-        // Try to parse the payload as a Cap'n Proto message using the
-        // byte-oriented API: `read_message_from_flat_slice` expects a
-        // `&mut &[u8]` pointing to the flat slice of bytes.
-        if got == 0 {
-            println!("server_thread: empty payload");
-        } else {
-            let mut slice: &[u8] = &buf[..got];
-            match serialize::read_message_from_flat_slice(&mut slice, ReaderOptions::new()) {
-                Ok(message_reader) => match message_reader.get_root::<hello_capnp::hello_request::Reader>() {
-                    Ok(req) => {
-                        // Debug: check whether the reply_path field is present
-                        if req.has_reply_path() {
-                            match req.get_reply_path() {
-                                Ok(path) => println!("capnp: HelloRequest.reply_path = {}", path),
-                                Err(_) => println!("capnp: HelloRequest.reply_path present but invalid"),
-                            }
-                        } else {
-                            println!("capnp: HelloRequest has no reply_path field set");
-                        }
-                        // Also log name if present
-                        if req.has_name() {
-                            match req.get_name() {
-                                Ok(n) => println!("capnp: HelloRequest.name = {}", n),
-                                Err(_) => println!("capnp: HelloRequest.name invalid"),
-                            }
-                        }
-                    }
-                    Err(e) => println!("capnp: get_root failed: {:?}", e),
-                },
-                Err(e) => println!("capnp: read_message_from_flat_slice failed: {:?}", e),
-            }
-        }
-
-        let _ = close(fh);
-
-        Ok(())
     }
 }
 
