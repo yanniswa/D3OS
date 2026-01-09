@@ -23,7 +23,7 @@ use crate::{
     acpi_tables, allocator, apic, gdt, get_initrd_frames,
     efi_services_available, init_acpi_tables, init_apic, init_boot_info,
     init_cpu_info, init_initrd, init_lfb, init_lfb_info, init_pci,
-    init_serial_port, init_tty, initrd, keyboard, logger, mouse,
+    init_serial_port, init_tty, keyboard, logger, mouse,
     process_manager, scheduler, serial_port, timer, tss,
 };
 use crate::{built_info, memory, naming, network, storage};
@@ -87,6 +87,12 @@ pub extern "C" fn start(multiboot2_magic: u32, multiboot2_addr: *const BootInfor
     // Has to be done after EFI boot services have been exited, since they rely on their own GDT
     info!("Initializing GDT");
     init_gdt();
+
+    // Enable FSGSBASE
+    info!("Enabling FSGSBASE instructions");
+    unsafe {
+        Cr4::update(|flags| flags.insert(Cr4Flags::FSGSBASE));
+    }
 
     // The bootloader marks the kernel image region as available, so we need to reserve it manually
     let kernel_image_region = kernel_image_region();
@@ -347,21 +353,14 @@ pub extern "C" fn start(multiboot2_magic: u32, multiboot2_addr: *const BootInfor
 
     if BOOT_TO_GUI {
         // Create and register the 'window_manager' thread in the scheduler
-        scheduler().ready(Thread::load_application(initrd().entries()
-            .find(|entry| entry.filename().as_str().unwrap() == "bin/window_manager")
-            .expect("Window Manager application not available!")
-            .data(), "window_manager", &[].to_vec()));
+        scheduler().ready(Thread::load_application(
+            "bin/window_manager", "window_manager", &[].to_vec(),
+        ).expect("failed to load window_manager"));
     } else {
         // Create and register the 'terminal_emulator' thread (from app image in ramdisk) in the scheduler
         scheduler().ready(Thread::load_application(
-            initrd()
-                .entries()
-                .find(|entry| entry.filename().as_str().unwrap() == "bin/terminal_emulator")
-                .expect("Terminal application not available!")
-                .data(),
-            "terminal_emulator",
-            &[].to_vec(),
-        ));
+            "bin/terminal_emulator", "terminal_emulator", &[].to_vec(),
+        ).expect("failed to load terminal_emulator"));
     }
 
     // Dump information about all processes (including VMAs)
@@ -398,11 +397,11 @@ fn init_gdt() {
         // Load task state segment
         load_tss(SegmentSelector::new(5, Ring0));
 
-        // Set code and stack segment register
+        // Set CS and SS segment registers
         CS::set_reg(SegmentSelector::new(1, Ring0));
         SS::set_reg(SegmentSelector::new(2, Ring0));
 
-        // Other segment registers are not used in long mode (set to 0)
+        // Other segment registers are unused in 64-bit mode, so we set them to null selectors
         DS::set_reg(SegmentSelector::new(0, Ring0));
         ES::set_reg(SegmentSelector::new(0, Ring0));
         FS::set_reg(SegmentSelector::new(0, Ring0));
@@ -503,6 +502,10 @@ fn scan_efi_multiboot2_memory_map(memory_map: &EFIMemoryMapTag) {
                 || area.ty.0 == MemoryType::BOOT_SERVICES_DATA.0
         }) // .0 necessary because of different version dependencies to uefi-crate
         .for_each(|area| {
+            if area.virt_start != 0 {
+                warn!("ignoring memory area with virtual address");
+                return;
+            }
             let start = PhysFrame::from_start_address(PhysAddr::new(area.phys_start).align_up(PAGE_SIZE as u64)).unwrap();
             let frames = PhysFrame::range(start, start + area.page_count);
 
@@ -530,6 +533,10 @@ fn scan_efi_memory_map(memory_map: &dyn MemoryMap) {
                 || area.ty == MemoryType::BOOT_SERVICES_DATA
         })
         .for_each(|area| {
+            if area.virt_start != 0 {
+                warn!("ignoring memory area with virtual address");
+                return;
+            }
             let start = PhysFrame::from_start_address(PhysAddr::new(area.phys_start).align_up(PAGE_SIZE as u64)).unwrap();
             let frames = PhysFrame::range(start, start + area.page_count);
 

@@ -35,6 +35,7 @@
 use crate::consts::MAIN_USER_STACK_START;
 use crate::consts::MAX_USER_STACK_SIZE;
 use crate::consts::USER_SPACE_ENV_START;
+use crate::initrd;
 use crate::memory::stack;
 use crate::memory::stack::StackAllocator;
 use crate::memory::vma::VmaType;
@@ -45,6 +46,8 @@ use crate::syscall::syscall_dispatcher::CORE_LOCAL_STORAGE_TSS_RSP0_PTR_INDEX;
 use crate::{process_manager, scheduler, tss};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use log::error;
+use log::warn;
 use core::arch::naked_asm;
 use core::ptr;
 use goblin::elf::Elf;
@@ -137,7 +140,12 @@ impl Thread {
     /// Load application code from `elf_buffer`, create a process with a main thread. \
     /// `name` is the name of the application, `args` are the arguments passed to the application. \
     /// Returns the main thread of the application which is not yet registered in the scheduler.
-    pub fn load_application(elf_buffer: &[u8], name: &str, args: &Vec<&str>) -> Arc<Thread> {
+    pub fn load_application(path: &str, name: &str, args: &Vec<&str>) -> Result<Arc<Thread>, ProcessLoadError> {
+        let elf_buffer = match initrd().entries().find(|entry| entry.filename().as_str().unwrap() == path) {
+            Some(app) => app.data(),
+            None => return Err(ProcessLoadError::NotFound),
+        };
+        
         let current_process = process_manager().read().current_process();
         let new_process = process_manager().write().create_process();
         let pid = new_process.id();
@@ -146,7 +154,7 @@ impl Thread {
         info!("load_application: pid = {pid}, tid = {tid}, name = {name}",);
 
         // parse elf file headers and map and copy code if successful
-        let entry = Thread::parse_and_map_elf_bin(&current_process, &new_process, elf_buffer, name);
+        let entry = Thread::parse_and_map_elf_bin(&current_process, &new_process, elf_buffer, name)?;
 
         // create environment for the application and copy arguments
         Thread::copy_args(&new_process, name, args);
@@ -158,7 +166,7 @@ impl Thread {
         extern "sysv64" fn entry_fn() {
             unreachable!()
         }
-        Self::new_user_thread(new_process, VirtAddr::new(entry), entry_fn)
+        Ok(Self::new_user_thread(new_process, VirtAddr::new(entry), entry_fn))
     }
 
     /// Create user thread. Not started yet, nor registered in the scheduler. \
@@ -177,9 +185,7 @@ impl Thread {
         // Allocate kernel stack for the main thread
         let kernel_stack = stack::alloc_kernel_stack(&parent, pid, tid, "userthread");
 
-        //
         // Create user stack for the application
-        //
         let stack_vma = parent.virtual_address_space.user_alloc_map_partial(None, (MAX_USER_STACK_SIZE / PAGE_SIZE) as u64,  VmaType::UserStack, "usrstack", 1, true).expect("could not create user stack");
 
         // Make a Vec for the user stack
@@ -288,13 +294,13 @@ impl Thread {
     /// Prepare a fake stack for starting a thread in kernel mode
     fn prepare_kernel_stack(&self) {
         let mut stacks = self.stacks.lock();
-        let stack_addr = stacks.kernel_stack.as_ptr() as u64;
-        let capacity = stacks.kernel_stack.capacity();
 
         // init stack with 0s
         for _ in 0..stacks.kernel_stack.capacity() {
             stacks.kernel_stack.push(0);
         }
+        let top_of_stack = Self::get_top_of_stack(&stacks.kernel_stack);
+        let capacity = stacks.kernel_stack.capacity();
 
         stacks.kernel_stack[capacity - 1] = 0x00DEAD00u64; // Dummy return address
         stacks.kernel_stack[capacity - 2] = Thread::kickoff_kernel_thread as u64; // Address of 'kickoff_kernel_thread()';
@@ -318,7 +324,10 @@ impl Thread {
         stacks.kernel_stack[capacity - 17] = 0; // rdi
         stacks.kernel_stack[capacity - 18] = 0; // rbp
 
-        stacks.old_rsp0 = VirtAddr::new(stack_addr + ((capacity - 18) * 8) as u64);
+        stacks.kernel_stack[capacity - 19] = 0; // fsbase
+        stacks.kernel_stack[capacity - 20] = 0; // gsbase
+
+        stacks.old_rsp0 = VirtAddr::new((top_of_stack as usize - 8 * 20) as u64);
     }
 
     /// Switch a thread to user mode by preparing a fake stackframe
@@ -350,30 +359,42 @@ impl Thread {
         }
     }
 
-    /// Helper function to parse ELF binary and map it into the new process's address space
-    /// Used only by `load_application()`
-    fn parse_and_map_elf_bin(current_process: &Arc<Process>, new_process: &Arc<Process>, elf_buffer: &[u8], name: &str) -> u64 {
-        let elf = Elf::parse(elf_buffer).expect("Failed to parse application");
+    /// Parse an ELF binary and and map it into the new process's address space.
+    ///
+    /// Returns the application's entry point.
+    fn parse_and_map_elf_bin(
+        current_process: &Arc<Process>, new_process: &Arc<Process>,
+        elf_buffer: &[u8], name: &str,
+    ) -> Result<u64, ProcessLoadError> {
+        let elf = Elf::parse(elf_buffer).map_err(|e| {
+            error!("Failed to parse application: {e:?}");
+            ProcessLoadError::ElfInvalid
+        })?;
+        if elf.entry == 0 {
+            error!("ELF has no entry point");
+            return Err(ProcessLoadError::ElfInvalid);
+        }
         elf.program_headers
             .iter()
             .filter(|header| header.p_type == elf64::program_header::PT_LOAD)
-            .for_each(|header| {
+            .try_for_each(|header| {
+                if header.p_vaddr == 0 || header.p_memsz == 0 {
+                    warn!("skipping empty ELF section {header:?}");
+                    return Ok(());
+                }
                 // Calc total number of pages for .text and .bss = 'p_memsz'
-                let total_page_count = if header.p_memsz as usize % PAGE_SIZE == 0 {
-                    header.p_memsz as usize / PAGE_SIZE
-                } else {
-                    (header.p_memsz as usize / PAGE_SIZE) + 1
-                };
+                let total_page_count = header.p_memsz.div_ceil(PAGE_SIZE.try_into().unwrap());
 
                 // Calc number of pages needed for the .text section = 'p_filesz'
-                let code_page_count = if header.p_filesz as usize % PAGE_SIZE == 0 {
-                    header.p_filesz as usize / PAGE_SIZE
-                } else {
-                    (header.p_filesz as usize / PAGE_SIZE) + 1
-                };
+                let code_page_count = header.p_filesz.div_ceil(PAGE_SIZE.try_into().unwrap());
 
                 // create mapping for 'total_page_count'
-                let virt_start = Page::from_start_address(VirtAddr::new(header.p_vaddr)).expect("ELF: Program section not page aligned");
+                let virt_start = Page::from_start_address(
+                    VirtAddr::new(header.p_vaddr)
+                ).map_err(|e| {
+                    error!("ELF: Program section not page aligned: {e:?}");
+                    ProcessLoadError::ElfInvalid
+                })?;
                 let vma = new_process
                     .virtual_address_space
                     .user_alloc_map_full(Some(virt_start), total_page_count as u64, VmaType::Code, name)
@@ -414,9 +435,10 @@ impl Thread {
                         dest_offset += PAGE_SIZE as u64;
                     }
                 }
-            });
+                Ok(())
+            })?;
 
-        elf.entry
+        Ok(elf.entry)
     }
 
     /// Helper function to provide arguments to a new application
@@ -475,6 +497,13 @@ impl Thread {
             }
         }
     }
+
+    /// Get a pointer to the top of the given stack.
+    fn get_top_of_stack(stack: &Vec<u64, StackAllocator>) -> *const u64 {
+        unsafe {
+            ptr::from_ref(&stack[stack.len() - 1]).offset(1)
+        }
+    }
 }
 
 /// Low-level function for starting a thread in kernel mode
@@ -482,6 +511,8 @@ impl Thread {
 unsafe extern "C" fn thread_kernel_start(old_rsp0: u64) {
     naked_asm!(
         "mov rsp, rdi", // First parameter -> load 'old_rsp0'
+        "pop rax", "wrgsbase rax",
+        "pop rax", "wrfsbase rax",
         "pop rbp",
         "pop rdi", // 'old_rsp0' is here
         "pop rsi",
@@ -535,14 +566,16 @@ unsafe extern "C" fn thread_switch(current_rsp0: *mut u64, next_rsp0: u64, next_
     "push rsi",
     "push rdi",
     "push rbp",
+    "rdfsbase rax", "push rax",
+    "rdgsbase rax", "push rax",
 
     // Save stack pointer in 'current_rsp0' (first parameter)
     "mov [rdi], rsp",
 
     // Set rsp0 of kernel stack in tss (third parameter 'next_rsp0_end')
     "swapgs", // Setup core local storage access via gs base
-    "mov rax,gs:[{CORE_LOCAL_STORAGE_TSS_RSP0_PTR_INDEX}]", // Load pointer to rsp0 entry of tss into rax
-    "mov [rax],rdx", // Set rsp0 entry in tss to 'next_rsp0_end' (third parameter)
+    "mov rax, gs:[{CORE_LOCAL_STORAGE_TSS_RSP0_PTR_INDEX}]", // Load pointer to rsp0 entry of tss into rax
+    "mov [rax], rdx", // Set rsp0 entry in tss to 'next_rsp0_end' (third parameter)
     "swapgs", // Restore gs base
 
     // Switch address space (fourth parameter 'next_cr3')
@@ -550,6 +583,8 @@ unsafe extern "C" fn thread_switch(current_rsp0: *mut u64, next_rsp0: u64, next_
 
     // Load registers of next thread by using 'next_rsp0' (second parameter)
     "mov rsp, rsi",
+    "pop rax", "wrgsbase rax",
+    "pop rax", "wrfsbase rax",
     "pop rbp",
     "pop rdi",
     "pop rsi",
@@ -569,6 +604,12 @@ unsafe extern "C" fn thread_switch(current_rsp0: *mut u64, next_rsp0: u64, next_
 
     "call unlock_scheduler", // force unlock, thread_switch locks Scheduler but returns later
     "ret", // Return to next thread
-    CORE_LOCAL_STORAGE_TSS_RSP0_PTR_INDEX = const CORE_LOCAL_STORAGE_TSS_RSP0_PTR_INDEX
+    CORE_LOCAL_STORAGE_TSS_RSP0_PTR_INDEX = const CORE_LOCAL_STORAGE_TSS_RSP0_PTR_INDEX,
     )
+}
+
+#[derive(Debug)]
+pub enum ProcessLoadError {
+    NotFound,
+    ElfInvalid,
 }

@@ -43,6 +43,8 @@ extern "sysv64" fn entry() {
         ALLOCATOR.lock().init(env::HEAP_START as *mut u8, env::HEAP_SIZE);
     }
 
+    thread::init_thread_environment();
+
     unsafe {
         main(*env::ARGC_PTR as isize, env::ARGV_PTR);
     }
