@@ -11,7 +11,7 @@
    ║   - touch  create a file                                                ║
    ║   - mkfifo create a named pipe                                          ║
    ╟─────────────────────────────────────────────────────────────────────────╢
-   ║ Author: Michael Schoettner, Univ. Duesseldorf, 25.8.2025                ║
+   ║ Author: Michael Schoettner, Univ. Duesseldorf, 23.12.2025               ║
    ╚═════════════════════════════════════════════════════════════════════════╝
 */
 
@@ -276,9 +276,8 @@ pub fn mkfifo(path: &str) -> Result<usize, Errno> {
 
     match result {
         Ok(_) => Ok(0), // Successfully created the pipe
-        Err(_) => {
-            // Handle the error here (e.g., logging or returning the error code)
-            Err(Errno::ENOTDIR)
+        Err(e) => {
+            Err(e)
         }
     }
 }

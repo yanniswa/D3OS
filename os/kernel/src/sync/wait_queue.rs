@@ -7,7 +7,7 @@
    ║   - wait:       Blocks calling thread if the given predicate is true.   ║
    ║   - notify_one: Deblocks one waiting thread (if any).                   ║
    ╟─────────────────────────────────────────────────────────────────────────╢
-   ║ Author: Michael Schoettner, Univ. Duesseldorf, 01.09.2025               ║
+   ║ Author: Michael Schoettner, Univ. Duesseldorf, 30.12.2025               ║
    ╚═════════════════════════════════════════════════════════════════════════╝
 */
 
@@ -23,23 +23,23 @@ pub struct WaitQueue {
 impl WaitQueue {
     pub fn new() -> WaitQueue {
         WaitQueue {
-            queue: IrqSaveSpinlock::new(VecDeque::<(usize,usize)>::new()),
+            queue: IrqSaveSpinlock::new(VecDeque::<(usize, usize)>::new()),
         }
     }
 
-    /// Block until `pred()` becomes true. 
+    /// Block until `pred()` becomes true.
     pub fn wait<F>(&self, mut pred: F)
     where
         F: FnMut() -> bool,
     {
+        // Because of spurious wakeups, we need to loop here.
         loop {
+            // Check predicate without acquiring the queue lock
             if pred() {
                 return;
             }
 
-            let (pid, tid) = scheduler().current_ids();
-
-            // Take the queue lock, and re-check the predicate while holding it to avoid racing with notify_*().
+            // Take the queue lock synchronizing against `notify_one`
             {
                 let mut quard = self.queue.lock(); // IRQs disabled & spinlocked here
 
@@ -48,31 +48,36 @@ impl WaitQueue {
                     return;
                 }
 
+                // Get caller thread's (pid, tid)
+                let (pid, tid) = scheduler().current_ids();
+
                 // Enqueue ourselves as a waiter
                 quard.push_back((pid, tid));
+
+                // Mark the caller thread as blocked
+                scheduler().prepare_to_block();
+
                 // lock is dropped here => IRQs restored
             }
 
-            // Block the current thread, it will be woken by notify_one/notify_all.
-            scheduler().block();
-            
+            // Yield the CPU to other threads. This must be outside the lock because we free cpu here.
+            scheduler().block_if_allowed();
+
             // On wake, loop and check pred() again.
         }
     }
 
-    /// Wake exactly one waiter (if any). Returns true if someone was woken.
+    /// Wake up exactly one waiter (if any). Returns true if someone was woken up.
     pub fn notify_one(&self) -> bool {
-        let waiter = {  
-            let mut quard = self.queue.lock();
-            quard.pop_front()
-        };
-        if let Some((pid, tid)) = waiter {
-            scheduler().deblock(pid, tid);
-            true
-        } else {
-            false
+        let mut guard = self.queue.lock();
+
+        while let Some((pid, tid)) = guard.pop_front() {
+            if scheduler().unblock(pid, tid) {
+                return true;
+            }
+            // else: stale waiter (killed/exited) -> keep going
         }
+
+        false
     }
-
-
- }
+}

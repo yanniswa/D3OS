@@ -3,7 +3,7 @@
    ╟─────────────────────────────────────────────────────────────────────────╢
    ║ Descr.: Low-level dispatcher for system calls.                          ║
    ╟─────────────────────────────────────────────────────────────────────────╢
-   ║ Author: Fabian Ruhland, 25.8.2025, HHU                                  ║
+   ║ Author: Fabian Ruhland, 26.12.2025, HHU                                 ║
    ╚═════════════════════════════════════════════════════════════════════════╝
 */
 use core::arch::naked_asm;
@@ -22,9 +22,9 @@ use x86_64::registers::rflags::RFlags;
 
 use super::sys_concurrent::{
     sys_process_count, sys_process_execute_binary, sys_process_exit,
-    sys_process_id, sys_thread_count, sys_thread_create, sys_thread_exit,
-    sys_thread_id, sys_thread_join, sys_thread_kill, sys_thread_sleep,
-    sys_thread_switch,
+    sys_process_id, sys_thread_count, sys_process_status, 
+    sys_thread_create, sys_thread_exit, sys_thread_id, sys_thread_join, 
+    sys_thread_kill, sys_thread_sleep, sys_thread_switch,
 };
 use super::sys_graphic::{sys_get_graphic_resolution, sys_write_graphic};
 use super::sys_input::{sys_read_keyboard, sys_read_mouse};
@@ -123,6 +123,7 @@ impl SyscallTable {
                 sys_process_id as *const _,
                 sys_process_exit as *const _,
                 sys_process_count as *const _,
+                sys_process_status as *const _,
                 sys_thread_create as *const _,
                 sys_thread_id as *const _,
                 sys_thread_switch as *const _,

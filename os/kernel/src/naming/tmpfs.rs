@@ -4,7 +4,7 @@
    ║ Temporary file system running storing everything in main memory. It     ║
    ║ supports directories, files, and named pipes.                           ║
    ╟─────────────────────────────────────────────────────────────────────────╢
-   ║ Author: Michael Schoettner, Univ. Duesseldorf, 01.09.2025               ║
+   ║ Author: Michael Schoettner, Univ. Duesseldorf, 23.12.2025               ║
    ╚═════════════════════════════════════════════════════════════════════════╝
 */
 use super::stat::Mode;
@@ -16,9 +16,11 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt::{Debug, Formatter};
 use core::result::Result;
+use core::sync::atomic::AtomicBool;
 use core::sync::atomic::AtomicUsize;
 use core::sync::atomic::Ordering;
 use core::{fmt, ptr};
+use log::{info, warn};
 use naming::shared_types::{DirEntry, FileType, OpenOptions};
 use nolock::queues::mpmc;
 use spin::rwlock::RwLock;
@@ -312,44 +314,72 @@ impl Debug for StaticFile {
 const PIPE_SIZE: usize = 0x1000;
 
 struct Pipe {
+    stat: RwLock<Stat>,
     rx: mpmc::bounded::scq::Receiver<u8>, // reader
     wx: mpmc::bounded::scq::Sender<u8>,   // writer
     rx_wq: WaitQueue,                     // readers block when pipe is empty
     wx_wq: WaitQueue,                     // writers block when pipe is full
-    stat: RwLock<Stat>,
-    count: AtomicUsize,
+    count: AtomicUsize,                   // number of bytes currently in the pipe
+    has_reader: AtomicBool,               // true if opened for reading
+    has_writer: AtomicBool,               // true if opened for writing
 }
 
 impl Pipe {
     pub fn new() -> Pipe {
         let (rx, wx) = mpmc::bounded::scq::queue(PIPE_SIZE);
         Self {
-            rx,
-            wx,
-            rx_wq: WaitQueue::new(),
-            wx_wq: WaitQueue::new(),
             stat: RwLock::new(Stat {
                 mode: Mode::new(0),
                 ..Stat::zeroed()
             }),
+            rx,
+            wx,
+            rx_wq: WaitQueue::new(),
+            wx_wq: WaitQueue::new(),
             count: AtomicUsize::new(0),
+            has_reader: AtomicBool::new(false),
+            has_writer: AtomicBool::new(false),
         }
     }
 
     #[inline]
     fn has_data(&self) -> bool {
-        self.count.load(Ordering::Acquire) > 0
+        self.count.load(Ordering::SeqCst) > 0
     }
 
     #[inline]
     fn has_space(&self) -> bool {
-        self.count.load(Ordering::Acquire) < PIPE_SIZE
+        self.count.load(Ordering::SeqCst) < PIPE_SIZE
+    }
+
+    #[inline]
+    fn has_reader(&self) -> bool {
+        self.has_reader.load(Ordering::SeqCst)
+    }
+
+    #[inline]
+    fn has_writer(&self) -> bool {
+        self.has_writer.load(Ordering::SeqCst)
     }
 }
 
 impl PipeObject for Pipe {
-    fn open(&self, _flags: OpenOptions) -> Result<usize, Errno> {
-        Ok(0)
+    fn open(&self, flags: OpenOptions) -> Result<usize, Errno> {
+        match flags {
+            OpenOptions::READONLY => {
+                self.has_reader.store(true, Ordering::SeqCst);
+                self.wx_wq.notify_one();
+                self.rx_wq.wait(|| self.has_writer());
+                Ok(0)
+            }
+            OpenOptions::WRITEONLY => {
+                self.has_writer.store(true, Ordering::SeqCst);
+                self.rx_wq.notify_one();
+                self.wx_wq.wait(|| self.has_reader());
+                Ok(0)
+            }
+            _ => Err(Errno::EINVAL),
+        }
     }
 
     fn stat(&self) -> Result<Stat, Errno> {
@@ -358,6 +388,9 @@ impl PipeObject for Pipe {
 
     /// Read from pipe buffer, `offset` is ignored
     fn read(&self, buf: &mut [u8], _offset: usize, _options: OpenOptions) -> Result<usize, Errno> {
+        // check if there is data available, otherwise block
+        self.rx_wq.wait(|| self.has_data());
+
         let total_to_read = buf.len();
 
         // Nothing to do?
@@ -376,7 +409,7 @@ impl PipeObject for Pipe {
             match self.rx.try_dequeue() {
                 Ok(byte) => {
                     // We consumed a byte
-                    self.count.fetch_sub(1, Ordering::Release);
+                    self.count.fetch_sub(1, Ordering::SeqCst);
 
                     // We freed space -> wake potentially blocked writer
                     self.wx_wq.notify_one();
@@ -386,6 +419,7 @@ impl PipeObject for Pipe {
                     total_read += 1;
                 }
                 Err(_) => {
+                    info!("reader: pipe empty, total_read={}", total_read);
                     // no data available -> block until data appears
                     self.rx_wq.wait(|| self.has_data());
                 }
@@ -405,14 +439,14 @@ impl PipeObject for Pipe {
 
         let mut total_written = 0;
         for byte in buf {
-//            info!("    pipe write loop");
+            //            info!("    pipe write loop");
             match self.wx.try_enqueue(*byte) {
                 Ok(()) => {
-                    self.count.fetch_add(1, Ordering::Release);
+                    self.count.fetch_add(1, Ordering::SeqCst);
 
                     // We have new data -> wake potentially blocked reader
                     self.rx_wq.notify_one();
-                   
+
                     total_written += 1;
                 }
                 Err(_) => {
@@ -423,6 +457,21 @@ impl PipeObject for Pipe {
         }
         Ok(total_written)
     }
+
+    fn close(&self, flags: OpenOptions) {
+        //info!("    pipe close, flags={:?}", flags);
+        match flags {
+            OpenOptions::READONLY => {
+                self.has_reader.store(false, Ordering::SeqCst);
+                self.wx_wq.notify_one();
+            }
+            OpenOptions::WRITEONLY => {
+                self.has_writer.store(false, Ordering::SeqCst);
+                self.rx_wq.notify_one();
+            }
+            _ => (),
+        }
+    }
 }
 
 impl Debug for Pipe {
@@ -430,3 +479,18 @@ impl Debug for Pipe {
         f.debug_struct("NamedPipe").finish()
     }
 }
+
+/*
+struct Pipe {
+    stat: RwLock<Stat>,
+    rx: mpmc::bounded::scq::Receiver<u8>, // reader
+    wx: mpmc::bounded::scq::Sender<u8>,   // writer
+    rx_wq: WaitQueue,                     // readers block when pipe is empty
+    wx_wq: WaitQueue,                     // writers block when pipe is full
+    count: AtomicUsize,                   // number of bytes currently in the pipe
+    has_reader: AtomicBool,               // true if opened for reading
+    has_writer: AtomicBool,               // true if opened for writing
+}
+
+
+*/

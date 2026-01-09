@@ -20,7 +20,8 @@ members = [
     "os/application/ip",
     "os/application/peanut-gb",
     "os/application/pipetest",
-    "os/application/window_manager",
+    "os/application/ps",
+     "os/application/window_manager",
     "os/application/terminal_emulator",
     "os/application/keytest",
 ]

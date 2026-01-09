@@ -3,7 +3,7 @@
    ╟─────────────────────────────────────────────────────────────────────────╢
    ║ Descr.: Syscall interface in user mode.                                 ║
    ╟─────────────────────────────────────────────────────────────────────────╢
-   ║ Author: Fabian Ruhland, Michael Schoettner, 25.8.2025, HHU              ║
+   ║ Author: Fabian Ruhland, Michael Schoettner, 26.12.2025, HHU             ║
    ╚═════════════════════════════════════════════════════════════════════════╝
 */
 #![no_std]
@@ -29,6 +29,7 @@ pub enum SystemCall {
     ProcessId,
     ProcessExit,
     ProcessCount,
+    ProcessStatus,
     ThreadCreate,
     ThreadId,
     ThreadSwitch,
