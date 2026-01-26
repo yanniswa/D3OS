@@ -12,7 +12,14 @@ use core::str;
 use core::sync::atomic::{AtomicBool, Ordering};
 use naming::shared_types::OpenOptions;
 use naming::{close, mkfifo, open, read};
-use terminal::println;
+// silence debug prints in this module during test runs by shadowing `println!`
+// (avoids editing every call site). The macro expands to a unit expression so
+// it can be used in both statement and expression positions. To re-enable
+// logging, restore `use terminal::println;` and remove this macro.
+#[allow(unused_macros)]
+macro_rules! println {
+    ($($arg:tt)*) => {{ () }};
+}
 pub mod hello_capnp {
     include!("./hello_capnp.rs");
 }
@@ -41,19 +48,11 @@ impl RPCServer {
             println!("mkfifo: ok");
         }
 
-        let server_handle = thread::create(|| {
-            // Mark as started when the server thread actually begins running.
-            SERVER_STARTED.store(true, Ordering::SeqCst);
-            Self::run_pipe_server();
-            // If run_pipe_server ever returns, clear the flag so init can retry later.
-            //SERVER_STARTED.store(false, Ordering::SeqCst);
-        });
-
-        if server_handle.is_some() {
-            println!("pipe_transport: started server thread");
-        } else {
-            println!("pipe_transport: server thread create returned None");
-        }
+        // Mark as started when the server thread actually begins running.
+        SERVER_STARTED.store(true, Ordering::SeqCst);
+        Self::run_pipe_server();
+        // If run_pipe_server ever returns, clear the flag so init can retry later.
+        //SERVER_STARTED.store(false, Ordering::SeqCst);
     }
 
     /// Return whether the server has already been started.
@@ -81,10 +80,6 @@ impl RPCServer {
     /// Run a simple pipe-based server loop that listens on `req_pipe` and
     /// replies to client reply pipes indicated inside each framed request.
     pub fn run_pipe_server() -> Result<(), i32> {
-        let thread = thread::current().unwrap();
-        let tid = thread.id();
-        let pid = concurrent::process::current().map(|p| p.id()).unwrap_or(0);
-
         println!("server_thread (tid={}): start", tid);
 
         // Persistent accept loop: open the request FIFO, read exactly one
@@ -309,6 +304,7 @@ impl RPCServer {
                                                 }
 
                                                 println!("server_thread (pid={} tid={}): reply sent, {} bytes written", pid, tid, off);
+                                                thread::sleep(1000);
                                                 let _ = close(reply_fh);
                                                 println!("server_thread (pid={} tid={}): closed reply_fh={}", pid, tid, reply_fh);
                                             }

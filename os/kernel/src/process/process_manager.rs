@@ -9,12 +9,12 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use log::info;
-use x86_64::structures::paging::frame::PhysFrameRange;
-use x86_64::structures::paging::Page;
 use x86_64::VirtAddr;
+use x86_64::structures::paging::Page;
+use x86_64::structures::paging::frame::PhysFrameRange;
 
-use crate::memory::{vmm, MemorySpace};
 use crate::memory::vma::VmaType;
+use crate::memory::{MemorySpace, vmm};
 use crate::process::process::Process;
 use crate::scheduler;
 
@@ -93,7 +93,7 @@ impl ProcessManager {
 
     /// Get reference to current process
     pub fn current_process(&self) -> Arc<Process> {
-        if self.active_processes.len() > 1 {
+        if self.active_processes.len() > 1 && scheduler().is_initialized() {
             scheduler().current_thread().process()
         } else {
             self.kernel_process().unwrap()
@@ -132,7 +132,7 @@ impl ProcessManager {
         self.exited_processes.push(process);
     }
 
-    /// 
+    ///
     pub fn drop_exited_process(&mut self) {
         self.exited_processes.clear();
     }

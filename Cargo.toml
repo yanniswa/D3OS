@@ -6,6 +6,7 @@ members = [
     "os/application/about",
     "os/application/hello",
     "os/application/rpctest",
+    "os/application/rpc_server",
     "os/application/helloc",
     "os/application/shell",
     "os/application/legacy_shell",

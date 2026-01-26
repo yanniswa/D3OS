@@ -2,7 +2,7 @@
 edition = "2024"
 name = "rpctest"
 version = "0.1.0"
-authors = ["Michael Schöttner <michael.schoettner@hhu.de>, Fabian Ruhland <ruhland@hhu.de>"]
+authors = ["Yannis Wagner <yannis.wagner@hhu.de>"]
 
 [lib]
 crate-type = ["staticlib"]

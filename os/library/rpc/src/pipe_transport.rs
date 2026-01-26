@@ -4,7 +4,7 @@ extern crate alloc;
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use concurrent::thread;
+use concurrent::thread::{self, sleep};
 use naming::shared_types::OpenOptions;
 use naming::{close, mkfifo, open, read, write};
 use syscall::return_vals::Errno;
@@ -36,7 +36,7 @@ fn writer_thread(msg: &[u8]) -> Option<Result<(), i32>> {
     let thread = thread::current().unwrap();
     // Include process id (if available) and thread id in logs for tracing
     let pid = concurrent::process::current().map(|p| p.id()).unwrap_or(0);
-    println!("writer_thread (pid={} tid={}): start", pid, thread.id());
+    println!("writer_thread (pid={} tid={}): start, msg.len()={}", pid, thread.id(), msg.len());
 
     let res = open("/myrpcpiperequest", OpenOptions::WRITEONLY);
     if res.is_err() {
@@ -44,13 +44,7 @@ fn writer_thread(msg: &[u8]) -> Option<Result<(), i32>> {
         return Some(Err(res.unwrap_err() as i32));
     }
     let fh = res.unwrap();
-    if fh == 0 {
-        println!(
-            "writer_thread (pid={} tid={}): WARNING: open returned fh=0 - possible fd reuse?",
-            pid,
-            thread.id()
-        );
-    }
+
     println!("writer_thread (pid={} tid={}): opened fh={}", pid, thread.id(), fh);
 
     // Build a single contiguous buffer containing [len_prefix | payload].
@@ -59,6 +53,7 @@ fn writer_thread(msg: &[u8]) -> Option<Result<(), i32>> {
     // still perform a full write loop, but interleaving between writers is
     // possible for those sizes.
     let total_len = msg.len();
+    println!("writer_thread (pid={} tid={}): total_len={}", pid, thread.id(), total_len);
     if total_len > (u32::MAX as usize) {
         println!("writer_thread: payload too large {}", total_len);
         let _ = close(fh);
@@ -66,9 +61,17 @@ fn writer_thread(msg: &[u8]) -> Option<Result<(), i32>> {
     }
     let len_be = (total_len as u32).to_le_bytes();
 
+    println!("writer_thread (pid={} tid={}): allocating buffer, capacity={}", pid, thread.id(), 4 + total_len);
     let mut full_buf: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(4 + total_len);
+    println!("writer_thread (pid={} tid={}): buffer allocated, extending...", pid, thread.id());
     full_buf.extend_from_slice(&len_be);
     full_buf.extend_from_slice(msg);
+    println!(
+        "writer_thread (pid={} tid={}): buffer ready, full_buf.len()={}",
+        pid,
+        thread.id(),
+        full_buf.len()
+    );
 
     // Helper to write a full buffer (may require multiple write() calls).
     let mut write_full = |buf: &[u8]| -> Result<usize, i32> {
@@ -134,6 +137,7 @@ fn writer_thread(msg: &[u8]) -> Option<Result<(), i32>> {
         }
     }
 
+    thread::sleep(500);
     match close(fh) {
         Ok(_) => println!("writer_thread: closed fh={}", fh),
         Err(e) => println!("writer_thread: close failed fh={} err={:?}", fh, e),
@@ -148,7 +152,7 @@ impl Transport for PipeTransport {
         // Start the server in a background thread so the client (writer)
         // and the server run concurrently and do not deadlock on FIFO
         // open/read semantics.
-        RPCServer::init();
+        //  RPCServer::init();
         /*  let server_handle = thread::create(|| {
                     pipe_server_runner();
                 });
