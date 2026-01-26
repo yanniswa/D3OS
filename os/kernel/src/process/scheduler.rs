@@ -127,6 +127,11 @@ impl Scheduler {
         self.ready_state.lock().ready_queue.iter().find(|thread| thread.id() == thread_id).cloned()
     }
 
+    /// Check if scheduler is initialized
+    pub fn is_initialized(&self) -> bool {
+        self.ready_state.lock().initialized
+    }
+
     /// Return (pid, tid) of current thread
     pub fn current_ids(&self) -> (usize, usize) {
         let tid = self.current_thread().id();
