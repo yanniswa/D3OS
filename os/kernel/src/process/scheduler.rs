@@ -23,7 +23,7 @@
    ║   - unblock                unblock a given thread                       ║
    ║   - get_status             for ps command - get all processes & threads ║
    ╟─────────────────────────────────────────────────────────────────────────╢
-   ║ Author: Fabian Ruhland & Michael Schopettner, 30.12.2025, HHU           ║
+   ║ Author: Fabian Ruhland & Michael Schopettner, 04.01.2026, HHU           ║
    ╚═════════════════════════════════════════════════════════════════════════╝
 */
 use crate::process::thread::{Thread, ThreadState};
@@ -236,13 +236,21 @@ impl Scheduler {
                 None
             }
         };
+
         // If found, wake it up
         if let Some(thread) = blocked_thread {
+            let mut state = self.get_ready_state();
+            thread.set_state(ThreadState::Ready);
+            state.ready_queue.push_front(Arc::clone(&thread));
+        }
+
+
+        /*if let Some(thread) = blocked_thread {
             // Record wake (harmless / consistent with semantics)
             thread.set_state(ThreadState::Ready);
             self.ready(thread);
             return true;
-        }
+        }*/
 
         // 2) Check ready queue (thread has not yet blocked) and current thread (thread has not blocked yet and is interrupted from a device interrupt)
         {
@@ -320,7 +328,7 @@ impl Scheduler {
     }
 
     /// Calling thread will block until thread with `thread_id` has terminated
-    pub fn join(&self, thread_id: usize) {
+    pub fn join(&self, thread_id: usize)  -> Result<usize, Errno> {
         let mut state = self.get_ready_state();
         let thread = Scheduler::current(&state);
 
@@ -331,11 +339,12 @@ impl Scheduler {
                 join_list.push(thread);
             } else {
                 // Joining on a non-existent thread has no effect (i.e. the thread has already finished running)
-                return;
+                return Err(Errno::ESRCH);
             }
         }
 
         self.block_and_switch(&mut state);
+        Ok(0)
     }
 
     /// Exit calling thread.
@@ -343,6 +352,7 @@ impl Scheduler {
         let mut ready_state;
         let current;
 
+       // info!("Scheduler: Exiting thread PID={}, TID={}", self.current_thread().process().id(), self.current_thread().id());
         {
             // Execute in own block, so that join_map is released automatically (block() does not return)
             let state = self.get_ready_state_and_join_map();
@@ -352,6 +362,7 @@ impl Scheduler {
             current = Scheduler::current(&ready_state);
             current.set_state(ThreadState::Exited);
 
+         //   info!("Scheduler: searching join-list");
             let join_list = join_map.get_mut(&current.id()).expect("Missing join_map entry!");
 
             for thread in join_list {
@@ -360,7 +371,7 @@ impl Scheduler {
 
             join_map.remove(&current.id());
         }
-
+       
         drop(current); // Decrease Rc manually, because block() does not return
         self.block_and_switch(&mut ready_state);
         unreachable!()

@@ -3,7 +3,7 @@
    ╟─────────────────────────────────────────────────────────────────────────╢
    ║ Descr.: Syscalls for thread functions.                                  ║
    ╟─────────────────────────────────────────────────────────────────────────╢
-   ║ Author: Fabian Ruhland, Michael Schoettner, 31.8.2024, HHU              ║
+   ║ Author: Fabian Ruhland, Michael Schoettner, 04.01.2026, HHU             ║
    ╚═════════════════════════════════════════════════════════════════════════╝
 */
 use alloc::boxed::Box;
@@ -11,8 +11,8 @@ use alloc::vec::Vec;
 use core::arch::asm;
 use core::ptr;
 use chrono::TimeDelta;
-use syscall::{syscall, SystemCall};
 use time::systime;
+use syscall::{SystemCall, syscall,return_vals::Errno};
 
 pub struct Thread {
     id: usize,
@@ -32,8 +32,8 @@ impl Thread {
         self.id
     }
 
-    pub fn join(&self) {
-        let _ = syscall(SystemCall::ThreadJoin, &[self.id]);
+    pub fn join(&self) -> Result<usize, Errno> {
+        syscall(SystemCall::ThreadJoin, &[self.id])
     }
 
     pub fn kill(&self) {

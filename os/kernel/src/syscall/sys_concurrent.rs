@@ -3,7 +3,7 @@
    ╟─────────────────────────────────────────────────────────────────────────╢
    ║ Descr.: All system calls related to processes and threads.              ║
    ╟─────────────────────────────────────────────────────────────────────────╢
-   ║ Author: Fabian Ruhland, 30.8.2024, HHU                                  ║
+   ║ Author: Fabian Ruhland, 04.01.2026, HHU                                 ║
    ╚═════════════════════════════════════════════════════════════════════════╝
 */
 use crate::process::thread::{ProcessLoadError, Thread};
@@ -64,8 +64,7 @@ pub extern "sysv64" fn sys_thread_sleep(ms: usize) -> isize {
 }
 
 pub extern "sysv64" fn sys_thread_join(id: usize) -> isize {
-    scheduler().join(id);
-    0
+   return_vals::convert_syscall_result_to_ret_code(scheduler().join(id))
 }
 
 pub extern "sysv64" fn sys_thread_kill(id: usize) -> isize {

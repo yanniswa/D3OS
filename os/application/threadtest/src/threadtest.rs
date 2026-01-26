@@ -38,7 +38,9 @@ pub fn main() {
 
     for _ in 0..num_threads {
         match thread::create(thread_fn) {
-            Some(t) => t.join(),
+            Some(t) => { 
+                let _ = t.join(); 
+            },
             None => println!("Failed to create anonymous thread!")
         }
     }

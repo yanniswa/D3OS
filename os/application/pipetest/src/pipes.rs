@@ -123,6 +123,15 @@ pub fn main() {
         reader_thread();
     });
 
+    println!("named pipe demo: reader.join()");
+    let res = reader.unwrap().join();
+    println!("named pipe demo: reader.join() result: {:?}", res);
+    
+    println!("named pipe demo: writer.join()");
+    let res = writer.unwrap().join();
+    println!("named pipe demo: writer.join() result: {:?}", res);
+
+
 /* 
     Currently, exit codes of threads are not stored. If reader and writer
     threads end in another order then the programed joins, the main

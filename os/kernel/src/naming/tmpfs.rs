@@ -4,7 +4,7 @@
    ║ Temporary file system running storing everything in main memory. It     ║
    ║ supports directories, files, and named pipes.                           ║
    ╟─────────────────────────────────────────────────────────────────────────╢
-   ║ Author: Michael Schoettner, Univ. Duesseldorf, 23.12.2025               ║
+   ║ Author: Michael Schoettner, Univ. Duesseldorf, 17.1.2026                ║
    ╚═════════════════════════════════════════════════════════════════════════╝
 */
 use super::stat::Mode;
@@ -388,6 +388,11 @@ impl PipeObject for Pipe {
 
     /// Read from pipe buffer, `offset` is ignored
     fn read(&self, buf: &mut [u8], _offset: usize, _options: OpenOptions) -> Result<usize, Errno> {
+        // EOF if no writer is present
+        if !self.has_writer.load(Ordering::SeqCst) && !self.has_data() {
+            return Err(Errno::EOF);
+        }
+
         // check if there is data available, otherwise block
         self.rx_wq.wait(|| self.has_data());
 
@@ -435,6 +440,11 @@ impl PipeObject for Pipe {
         // Nothing to do?
         if total_to_write == 0 {
             return Ok(0);
+        }
+
+        // EPIPE if no reader is present
+        if !self.has_reader.load(Ordering::SeqCst) {
+            return Err(Errno::EPIPE);
         }
 
         let mut total_written = 0;
