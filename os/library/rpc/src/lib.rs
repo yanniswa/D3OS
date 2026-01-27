@@ -1,5 +1,10 @@
 #![no_std]
 
+// Cap'n Proto generated code
+pub mod hello_capnp {
+    include!("./hello_capnp.rs");
+}
+
 // Expose centralized constants
 pub mod consts;
 
@@ -12,6 +17,9 @@ pub use log::{debug, error, info, trace, warn};
 
 // Expose I/O helpers
 pub mod io_helpers;
+
+// Expose RPC method handlers
+pub mod handlers;
 
 // Expose transport module (contains the `Transport` trait) so submodules can import it.
 pub mod pipe_transport;

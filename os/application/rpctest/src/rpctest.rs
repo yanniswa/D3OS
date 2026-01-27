@@ -8,7 +8,10 @@ use alloc::{
     vec::Vec,
 };
 use capnp::message::{Builder, Reader, ReaderOptions, SegmentArray};
-use concurrent::{process, thread};
+use concurrent::{
+    process,
+    thread::{self, sleep},
+};
 use naming::mkfifo;
 use rpc::HelloClient;
 use rpc::PipeTransport;
@@ -44,6 +47,16 @@ pub fn writer_capnp() {
         Err(_) => println!("say_hello failed"),
     }
 
+    match client.add(10, 6) {
+        Ok(sum) => println!("add returned: {}", sum),
+        Err(_) => println!("add failed"),
+    }
+
+    sleep(10000);
+    match client.add(10, 6) {
+        Ok(sum) => println!("add returned: {}", sum),
+        Err(_) => println!("add failed"),
+    }
     let mut msg = Builder::new_default();
 
     {
