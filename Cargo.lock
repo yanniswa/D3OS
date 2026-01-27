@@ -1260,9 +1260,11 @@ dependencies = [
  "capnpc",
  "concurrent",
  "log",
+ "logger",
  "naming",
  "syscall",
  "terminal",
+ "time",
 ]
 
 [[package]]

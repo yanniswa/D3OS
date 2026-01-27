@@ -19,7 +19,9 @@ naming = { path = "../../library/naming" }
 syscall = { path = "../../library/syscall" }
 terminal = { path = "../../library/terminal" }
 concurrent = { path = "../../library/concurrent" }
+time = { path = "../../library/time" }
 log = "0.4.26"
+logger = { path = "../../library/logger" }
 
 [build-dependencies]
 capnpc = "0.13"

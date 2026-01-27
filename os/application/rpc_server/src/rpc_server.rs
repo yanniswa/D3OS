@@ -3,12 +3,12 @@
 extern crate alloc;
 use runtime::*;
 
-use rpc::server::RPCServer;
+use rpc::server::RpcServer;
 use terminal::println;
 
 #[unsafe(no_mangle)]
 pub fn main() {
     println!("rpc_server: starting");
-    RPCServer::init();
+    RpcServer::init();
     println!("rpc_server: ended");
 }

@@ -1,9 +1,13 @@
+use crate::consts::MAX_RESPONSE_SIZE;
+use crate::error::RpcError;
 use crate::transport::Transport;
 extern crate alloc;
+use alloc::format;
 use alloc::string::String;
 use core::str;
+use core::sync::atomic::{AtomicU64, Ordering};
+use log::{debug, error};
 use naming::mkfifo;
-use terminal::println;
 
 use capnp::message::Builder;
 use capnp::serialize;
@@ -11,6 +15,11 @@ use capnp::serialize;
 pub mod hello_capnp {
     include!("../hello_capnp.rs");
 }
+
+// Global monotonic counter for generating unique reply paths
+// Uses u64 to guarantee no overflow in production (2^64 calls = 584 billion years at 1M req/s)
+// Combined with PID ensures uniqueness across process restarts
+static REPLY_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 pub struct HelloClient<T: Transport> {
     transport: T,
@@ -21,39 +30,31 @@ impl<T: Transport> HelloClient<T> {
         Self { transport }
     }
 
-    pub fn say_hello(&self, name: &str) -> Result<String, i32> {
-        /*
-
-        Cap'n Proto Builder erzeugen
-        Parameter in das Struct schreiben
-        Message serialisieren
-        Service-ID + Method-ID hinzufügen
-        Header mit Capnp serialisieren
-        Request über Transport senden
-        Antwort abwarten
-        Antwort deserialisieren
-        Ergebnis extrahieren und zurückgeben
-
-
-        Ich habe einen Client Stub --> erstmal hardcoden ?
-        welche Methoden sollte man anbieten für das OS ?
-        Kommunikation zwischen Servern
-            - naming service
-            - oskernel src naming api --> naming service
-        */
+    pub fn say_hello(&self, name: &str) -> Result<String, RpcError> {
         // Build a Cap'n Proto message for the request using the generated schema.
-        // The generated code will be available as `hello_capnp` (via build.rs).
-        const reply_path: &str = "/myrpcpipereply";
-        let res = mkfifo(reply_path);
-        if res.is_err() {
-            println!("mkfifo failed for reply, error: {:?}", res);
-        }
-        println!("mkfifo for reply: ok");
+        // Generate unique reply path using PID + monotonic counter
+        // Format: /rpc_reply_{pid}_{unique_id}
+        //
+        // Uniqueness guarantees:
+        // 1. PID ensures uniqueness across different processes
+        // 2. Monotonic counter ensures uniqueness within same process
+        // 3. Counter never wraps (u64 = 18 quintillion values)
+        // 4. Immune to time resets, clock adjustments, concurrent calls
+        // 5. Thread-safe via atomic operations (SeqCst for strongest guarantee)
+        let pid = concurrent::process::current().map(|p| p.id()).unwrap_or(0);
+        let unique_id = REPLY_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let reply_path = format!("/rpc_reply_{}_{}", pid, unique_id);
+
+        debug!("say_hello: generated unique reply path: {} (id={})", reply_path, unique_id);
+
+        // Create reply FIFO (ignore error if it already exists)
+        let _ = mkfifo(&reply_path);
+
         let mut message = Builder::new_default();
         {
             let mut root = message.init_root::<hello_capnp::hello_request::Builder>();
             root.set_name(name);
-            root.set_reply_path(reply_path);
+            root.set_reply_path(&reply_path);
         }
 
         // Serialize message into words and copy into a Vec<u8> so the bytes
@@ -79,14 +80,46 @@ impl<T: Transport> HelloClient<T> {
         }
 
         // receive response into a local buffer
-        let mut out = [0u8; 2048];
-        let n = self.transport.receive(&mut out)?;
+        let mut out = [0u8; MAX_RESPONSE_SIZE];
 
-        // For now, assume the server replies with a UTF-8 reply inside the capnp response payload
-        // If the server sends a capnp message, you would parse it similarly with capnp::serialize::read_message_from_flat_slice
-        match str::from_utf8(&out[..n]) {
-            Ok(s) => Ok(String::from(s)),
-            Err(_) => Err(-3),
+        // Read the entire response using the same pattern as server does for requests
+        let n = self.transport.receive(&mut out, &reply_path)?;
+        debug!("say_hello: received {} bytes total from transport", n);
+
+        // Parse the received bytes as a Cap'n Proto message
+        // The bytes should be in the flat Cap'n Proto format (no length prefix needed here,
+        // since receive() already handles reading the complete message)
+        let mut response_slice: &[u8] = &out[..n];
+
+        debug!("say_hello: attempting to parse {} bytes as Cap'n Proto HelloResponse", n);
+
+        match serialize::read_message_from_flat_slice(&mut response_slice, capnp::message::ReaderOptions::new()) {
+            Ok(reader) => {
+                debug!("say_hello: Cap'n Proto message parsed successfully");
+                match reader.get_root::<hello_capnp::hello_response::Reader>() {
+                    Ok(response) => {
+                        debug!("say_hello: got root as HelloResponse");
+                        match response.get_reply() {
+                            Ok(reply_text) => {
+                                debug!("say_hello: deserialized reply: {}", reply_text);
+                                Ok(String::from(reply_text))
+                            }
+                            Err(e) => {
+                                error!("say_hello: failed to get reply field: {:?}", e);
+                                Err(RpcError::CapnpGetFieldFailed)
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("say_hello: failed to get root HelloResponse: {:?}", e);
+                        Err(RpcError::CapnpGetRootFailed)
+                    }
+                }
+            }
+            Err(e) => {
+                error!("say_hello: failed to deserialize response: {:?}", e);
+                Err(RpcError::DeserializationFailed)
+            }
         }
     }
 }

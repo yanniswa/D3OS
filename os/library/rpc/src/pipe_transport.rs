@@ -1,24 +1,16 @@
-#![no_std]
+#![allow(unused_imports)]
 
 extern crate alloc;
 
-use alloc::string::String;
-use alloc::vec::Vec;
-use concurrent::thread::{self, sleep};
-use naming::shared_types::OpenOptions;
-use naming::{close, mkfifo, open, read, write};
-use syscall::return_vals::Errno;
-use terminal::println;
-
-use crate::server::RPCServer;
-/// A simple PipeTransport that implements the `Transport` trait using
-/// a well-known request pipe and a per-client reply pipe. Messages are
-/// framed as:
-/// [u32 total_len][u16 reply_path_len][reply_path bytes][payload bytes]
-/// The server must read the reply_path and send the response to it as
-/// [u32 resp_len][resp_bytes]
+use crate::consts::{CLIENT_CLOSE_DELAY_MS, MAX_CAPNP_SEGMENTS, MAX_SEGMENT_TABLE_SIZE, PIPE_BUF};
+use crate::error::RpcError;
+use crate::io_helpers::{read_exact, write_exact};
 use crate::transport::Transport;
-use core::cmp::min;
+use alloc::string::String;
+use concurrent::thread;
+use log::{debug, error, trace};
+use naming::shared_types::OpenOptions;
+use naming::{close, open};
 
 pub struct PipeTransport {}
 
@@ -28,24 +20,20 @@ impl PipeTransport {
     }
 }
 
-fn pipe_server_runner() {
-    println!("writer_thread: calling RPCServer::run_pipe_server()...");
-    RPCServer::run_pipe_server();
-}
-fn writer_thread(msg: &[u8]) -> Option<Result<(), i32>> {
+fn writer_thread(msg: &[u8]) -> Option<Result<(), RpcError>> {
     let thread = thread::current().unwrap();
     // Include process id (if available) and thread id in logs for tracing
     let pid = concurrent::process::current().map(|p| p.id()).unwrap_or(0);
-    println!("writer_thread (pid={} tid={}): start, msg.len()={}", pid, thread.id(), msg.len());
+    debug!("writer_thread (pid={} tid={}): start, msg.len()={}", pid, thread.id(), msg.len());
 
     let res = open("/myrpcpiperequest", OpenOptions::WRITEONLY);
     if res.is_err() {
-        println!("writer_thread (pid={} tid={}): open failed, error: {:?}", pid, thread.id(), res);
-        return Some(Err(res.unwrap_err() as i32));
+        error!("writer_thread (pid={} tid={}): open failed, error: {:?}", pid, thread.id(), res);
+        return Some(Err(RpcError::PipeOpenFailed));
     }
     let fh = res.unwrap();
 
-    println!("writer_thread (pid={} tid={}): opened fh={}", pid, thread.id(), fh);
+    debug!("writer_thread (pid={} tid={}): opened fh={}", pid, thread.id(), fh);
 
     // Build a single contiguous buffer containing [len_prefix | payload].
     // If this buffer is <= PIPE_BUF the kernel will write it atomically
@@ -53,117 +41,64 @@ fn writer_thread(msg: &[u8]) -> Option<Result<(), i32>> {
     // still perform a full write loop, but interleaving between writers is
     // possible for those sizes.
     let total_len = msg.len();
-    println!("writer_thread (pid={} tid={}): total_len={}", pid, thread.id(), total_len);
+    debug!("writer_thread (pid={} tid={}): total_len={}", pid, thread.id(), total_len);
     if total_len > (u32::MAX as usize) {
-        println!("writer_thread: payload too large {}", total_len);
+        error!(
+            "writer_thread (pid={} tid={}): payload too large {} (max: {})",
+            pid,
+            thread.id(),
+            total_len,
+            u32::MAX as usize
+        );
         let _ = close(fh);
-        return Some(Err(-1));
+        return Some(Err(RpcError::MessageTooLarge {
+            size: total_len,
+            max: u32::MAX as usize,
+        }));
     }
     let len_be = (total_len as u32).to_le_bytes();
 
-    println!("writer_thread (pid={} tid={}): allocating buffer, capacity={}", pid, thread.id(), 4 + total_len);
+    debug!("writer_thread (pid={} tid={}): allocating buffer, capacity={}", pid, thread.id(), 4 + total_len);
     let mut full_buf: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(4 + total_len);
-    println!("writer_thread (pid={} tid={}): buffer allocated, extending...", pid, thread.id());
+    debug!("writer_thread (pid={} tid={}): buffer allocated, extending...", pid, thread.id());
     full_buf.extend_from_slice(&len_be);
     full_buf.extend_from_slice(msg);
-    println!(
+    debug!(
         "writer_thread (pid={} tid={}): buffer ready, full_buf.len()={}",
         pid,
         thread.id(),
         full_buf.len()
     );
 
-    // Helper to write a full buffer (may require multiple write() calls).
-    let mut write_full = |buf: &[u8]| -> Result<usize, i32> {
-        let mut off = 0usize;
-        while off < buf.len() {
-            match write(fh, &buf[off..]) {
-                Ok(n) if n > 0 => {
-                    println!("writer_thread: write returned n={} off={}/{} fh={}", n, off, buf.len(), fh);
-                    off += n;
-                }
-                Ok(0) => {
-                    println!("writer_thread: write returned 0 (unexpected) off={}/{} fh={}", off, buf.len(), fh);
-                    return Err(-5);
-                }
-                Err(e) => {
-                    println!("writer_thread: write error: {:?} off={}/{} fh={}", e, off, buf.len(), fh);
-                    return Err(e as i32);
-                }
-                _ => {
-                    println!("writer_thread: write returned unknown result off={}/{} fh={}", off, buf.len(), fh);
-                    return Err(-6);
-                }
-            }
-        }
-        Ok(off)
-    };
-
-    // Try to perform the write. If the total message fits into PIPE_BUF,
-    // the kernel will perform it atomically which prevents interleaving
-    // with other writers. Otherwise we still write fully but other
-    // writers may interleave.
-    const PIPE_BUF: usize = 4096;
-    // Diagnostic: log overall len and a short hex preview of the buffer.
-    println!("writer_thread: full_buf.len() = {}", full_buf.len());
-    {
-        let preview_len = core::cmp::min(full_buf.len(), 16);
-        let mut s = String::new();
-        for b in &full_buf[..preview_len] {
-            use core::fmt::Write as _;
-            let _ = write!(&mut s, "{:02x}", b);
-        }
-        println!("writer_thread: preview ({} bytes) = {}", preview_len, s);
+    // Helper to write the full buffer using the write_exact helper
+    if let Err(e) = write_exact(fh, &full_buf) {
+        error!("writer_thread (pid={} tid={}): write_exact failed: {:?}", pid, thread.id(), e);
+        let _ = close(fh);
+        return Some(Err(e));
     }
 
-    if full_buf.len() <= PIPE_BUF {
-        match write_full(&full_buf) {
-            Ok(n) => println!("writer_thread: atomic send complete, {} bytes written", n),
-            Err(e) => {
-                println!("writer_thread: write failed: {:?}", e);
-                let _ = close(fh);
-                return Some(Err(e));
-            }
-        }
-    } else {
-        // For large messages, just use write_full (may be interleaved)
-        match write_full(&full_buf) {
-            Ok(n) => println!("writer_thread: send complete, {} bytes written", n),
-            Err(e) => {
-                println!("writer_thread: write failed: {:?}", e);
-                let _ = close(fh);
-                return Some(Err(e));
-            }
-        }
-    }
+    debug!(
+        "writer_thread (pid={} tid={}): send complete, {} bytes written",
+        pid,
+        thread.id(),
+        full_buf.len()
+    );
 
-    thread::sleep(500);
+    // TODO: Remove this sleep workaround. This is a race condition fix
+    // that should be replaced with proper pipe-close protocol or ACK mechanism.
+    thread::sleep(CLIENT_CLOSE_DELAY_MS);
     match close(fh) {
-        Ok(_) => println!("writer_thread: closed fh={}", fh),
-        Err(e) => println!("writer_thread: close failed fh={} err={:?}", fh, e),
+        Ok(_) => debug!("writer_thread: closed fh={}", fh),
+        Err(e) => error!("writer_thread: close failed fh={} err={:?}", fh, e),
     }
 
     None
 }
-//TODO: mkfifo darf nicht in send passieren, bei mehrfachen send Aufruf --> problem
-//TODO: Pipename dynamisch generieren für reply pipe und mit client id versehen
+
 impl Transport for PipeTransport {
-    fn send(&self, msg: &[u8]) -> Result<(), i32> {
-        // Start the server in a background thread so the client (writer)
-        // and the server run concurrently and do not deadlock on FIFO
-        // open/read semantics.
-        //  RPCServer::init();
-        /*  let server_handle = thread::create(|| {
-                    pipe_server_runner();
-                });
-                if server_handle.is_some() {
-                    println!("pipe_transport: started server thread");
-                } else {
-                    println!("pipe_transport: server thread create returned None");
-                }
-        */
+    fn send(&self, msg: &[u8]) -> Result<(), RpcError> {
         // Perform the write from this thread (synchronous). If the writer
-        // encounters an error, propagate it as Err(i32).
+        // encounters an error, propagate it as Err(RpcError).
         if let Some(res) = writer_thread(msg) {
             return res;
         }
@@ -171,157 +106,133 @@ impl Transport for PipeTransport {
         Ok(())
     }
 
-    fn receive<'a>(&self, out: &'a mut [u8]) -> Result<usize, i32> {
+    fn receive<'a>(&self, out: &'a mut [u8], reply_path: &str) -> Result<usize, RpcError> {
         let thread = thread::current().unwrap();
         let pid = concurrent::process::current().map(|p| p.id()).unwrap_or(0);
 
-        const REPLY_PATH: &str = "/myrpcpipereply";
-        println!("receive (pid={} tid={}): opening reply pipe: {}", pid, thread.id(), REPLY_PATH);
+        debug!("receive (pid={} tid={}): opening reply pipe: {}", pid, thread.id(), reply_path);
 
-        let res = open(REPLY_PATH, OpenOptions::READONLY);
+        let res = open(reply_path, OpenOptions::READONLY);
         if res.is_err() {
-            println!("receive (pid={} tid={}): open reply failed: {:?}", pid, thread.id(), res);
-            return Err(res.unwrap_err() as i32);
+            error!("receive (pid={} tid={}): open reply failed: {:?}", pid, thread.id(), res);
+            return Err(RpcError::PipeOpenFailed);
         }
         let fh = res.unwrap();
-        println!("receive (pid={} tid={}): opened reply fh={}", pid, thread.id(), fh);
+        debug!("receive (pid={} tid={}): opened reply fh={}", pid, thread.id(), fh);
 
-        // Read 4-byte length prefix
-        let mut len_buf = [0u8; 4];
-        let mut off = 0usize;
-        while off < 4 {
-            match read(fh, &mut len_buf[off..]) {
-                Ok(n) if n > 0 => {
-                    println!("receive: read length n={} off={}/4", n, off);
-                    off += n;
-                }
-                Ok(0) => {
-                    if off > 0 {
-                        // Partial read - retry like server does
-                        let mut retries = 0usize;
-                        const MAX_RETRIES: usize = 8;
-                        println!("receive: partial EOF at off={}, retrying up to {} times", off, MAX_RETRIES);
-                        let mut got_something = false;
-                        while retries < MAX_RETRIES && off < 4 {
-                            match read(fh, &mut len_buf[off..]) {
-                                Ok(n) if n > 0 => {
-                                    println!("receive: retry read n={} off={}/4", n, off);
-                                    off += n;
-                                    got_something = true;
-                                    break;
-                                }
-                                Ok(0) => {
-                                    retries += 1;
-                                    thread::switch();
-                                    continue;
-                                }
-                                Err(e) => {
-                                    println!("receive: retry read error: {:?}", e);
-                                    let _ = close(fh);
-                                    return Err(e as i32);
-                                }
-                                _ => {
-                                    let _ = close(fh);
-                                    return Err(-3);
-                                }
-                            }
-                        }
-                        if !got_something && off < 4 {
-                            println!("receive: EOF persisted after {} retries", retries);
-                            let _ = close(fh);
-                            return Err(-2);
-                        }
-                    } else {
-                        println!("receive: EOF while reading length at start");
-                        let _ = close(fh);
-                        return Err(-2);
-                    }
-                }
-                Err(e) => {
-                    println!("receive: read length error: {:?}", e);
-                    let _ = close(fh);
-                    return Err(e as i32);
-                }
-                _ => {
-                    let _ = close(fh);
-                    return Err(-3);
-                }
-            }
-        }
-
-        let reply_len = u32::from_le_bytes(len_buf) as usize;
-        println!("receive (pid={} tid={}): reply length = {}", pid, thread.id(), reply_len);
-
-        if reply_len > out.len() {
-            println!("receive: reply too large ({} > {})", reply_len, out.len());
+        // Read Cap'n Proto wire format: first segment count (4 bytes)
+        let mut segment_count_buf = [0u8; 4];
+        if let Err(e) = read_exact(fh, &mut segment_count_buf) {
+            error!("receive: failed to read segment count");
             let _ = close(fh);
-            return Err(-4);
+            return Err(e);
         }
 
-        // Read reply payload
-        off = 0;
-        while off < reply_len {
-            match read(fh, &mut out[off..reply_len]) {
-                Ok(n) if n > 0 => {
-                    println!("receive: read payload n={} off={}/{}", n, off, reply_len);
-                    off += n;
-                }
-                Ok(0) => {
-                    if off > 0 {
-                        // Partial read - retry like server does
-                        let mut retries = 0usize;
-                        const MAX_RETRIES: usize = 8;
-                        println!("receive: partial EOF in payload at off={}/{}, retrying", off, reply_len);
-                        let mut got_something = false;
-                        while retries < MAX_RETRIES && off < reply_len {
-                            match read(fh, &mut out[off..reply_len]) {
-                                Ok(n) if n > 0 => {
-                                    println!("receive: retry payload n={} off={}/{}", n, off, reply_len);
-                                    off += n;
-                                    got_something = true;
-                                    break;
-                                }
-                                Ok(0) => {
-                                    retries += 1;
-                                    thread::switch();
-                                    continue;
-                                }
-                                Err(e) => {
-                                    println!("receive: retry payload error: {:?}", e);
-                                    let _ = close(fh);
-                                    return Err(e as i32);
-                                }
-                                _ => {
-                                    let _ = close(fh);
-                                    return Err(-6);
-                                }
-                            }
-                        }
-                        if !got_something && off < reply_len {
-                            println!("receive: EOF persisted in payload after {} retries", retries);
-                            let _ = close(fh);
-                            return Err(-5);
-                        }
-                    } else {
-                        println!("receive: EOF while reading payload at start");
-                        let _ = close(fh);
-                        return Err(-5);
-                    }
-                }
-                Err(e) => {
-                    println!("receive: read payload error: {:?}", e);
-                    let _ = close(fh);
-                    return Err(e as i32);
-                }
-                _ => {
-                    let _ = close(fh);
-                    return Err(-6);
-                }
+        // Cap'n Proto wire format stores (segment_count - 1) in the first 4 bytes
+        // to save one bit. We add 1 back to get the actual segment count.
+        let segment_count = u32::from_le_bytes(segment_count_buf).wrapping_add(1);
+        debug!("receive (pid={} tid={}): segment_count = {}", pid, thread.id(), segment_count);
+
+        if segment_count == 0 || segment_count > MAX_CAPNP_SEGMENTS as u32 {
+            error!("receive: invalid segment_count={}", segment_count);
+            let _ = close(fh);
+            return Err(RpcError::InvalidSegmentCount);
+        }
+
+        // Read segment sizes (4 bytes per segment)
+        let sizes_len = (segment_count as usize) * 4;
+        let mut sizes_buf = [0u8; MAX_SEGMENT_TABLE_SIZE];
+        if sizes_len > sizes_buf.len() {
+            error!("receive: too many segments");
+            let _ = close(fh);
+            return Err(RpcError::InvalidSegmentCount);
+        }
+
+        if let Err(e) = read_exact(fh, &mut sizes_buf[..sizes_len]) {
+            error!("receive: failed to read segment sizes");
+            let _ = close(fh);
+            return Err(e);
+        }
+
+        // Calculate total message size
+        let mut total_words = 0usize;
+        for i in 0..segment_count as usize {
+            let size = u32::from_le_bytes([sizes_buf[i * 4], sizes_buf[i * 4 + 1], sizes_buf[i * 4 + 2], sizes_buf[i * 4 + 3]]) as usize;
+            total_words += size;
+        }
+
+        // Padding after segment table (if odd number of segments)
+        let padding = if segment_count % 2 == 0 { 4 } else { 0 };
+        if padding > 0 {
+            let mut pad_buf = [0u8; 4];
+            if let Err(e) = read_exact(fh, &mut pad_buf[..padding]) {
+                error!("receive: failed to read padding");
+                let _ = close(fh);
+                return Err(e);
             }
         }
 
-        println!("receive (pid={} tid={}): received {} bytes, closing fh={}", pid, thread.id(), reply_len, fh);
+        debug!(
+            "receive (pid={} tid={}): total_words = {}, padding = {}",
+            pid,
+            thread.id(),
+            total_words,
+            padding
+        );
+
+        // Read actual message data (in words = 8 bytes each)
+        let total_bytes = total_words * 8;
+        if total_bytes > out.len() {
+            error!("receive: message too large ({} > {})", total_bytes, out.len());
+            let _ = close(fh);
+            return Err(RpcError::MessageTooLarge {
+                size: total_bytes,
+                max: out.len(),
+            });
+        }
+
+        if let Err(e) = read_exact(fh, &mut out[..total_bytes]) {
+            error!("receive: failed to read message data");
+            let _ = close(fh);
+            return Err(e);
+        }
+
+        // Now we need to reconstruct the complete message in out buffer
+        // Format: [segment_count][segment_sizes][padding?][data]
+        // We'll build it by shifting data and prepending the header
+
+        // Calculate header size
+        let header_size = 4 + sizes_len + padding;
+        let complete_size = header_size + total_bytes;
+
+        if complete_size > out.len() {
+            error!("receive: complete message too large ({} > {})", complete_size, out.len());
+            let _ = close(fh);
+            return Err(RpcError::MessageTooLarge {
+                size: complete_size,
+                max: out.len(),
+            });
+        }
+
+        // Shift data to make room for header using optimized slice operations
+        // This is more efficient than byte-by-byte copy
+        out.copy_within(0..total_bytes, header_size);
+
+        // Write header
+        out[0..4].copy_from_slice(&segment_count_buf);
+        out[4..4 + sizes_len].copy_from_slice(&sizes_buf[..sizes_len]);
+        if padding > 0 {
+            out[4 + sizes_len..4 + sizes_len + padding].fill(0);
+        }
+
+        debug!(
+            "receive (pid={} tid={}): received {} bytes total, closing fh={}",
+            pid,
+            thread.id(),
+            complete_size,
+            fh
+        );
         let _ = close(fh);
-        Ok(reply_len)
+        Ok(complete_size)
     }
 }
