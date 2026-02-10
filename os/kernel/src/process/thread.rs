@@ -311,7 +311,7 @@ impl Thread {
         let capacity = stacks.kernel_stack.capacity();
 
         stacks.kernel_stack[capacity - 1] = 0x00DEAD00u64; // Dummy return address
-        stacks.kernel_stack[capacity - 2] = Thread::kickoff_kernel_thread as u64; // Address of 'kickoff_kernel_thread()';
+        stacks.kernel_stack[capacity - 2] = Thread::kickoff_kernel_thread as *const () as u64; // Address of 'kickoff_kernel_thread()';
         stacks.kernel_stack[capacity - 3] = 0x202; // rflags (Interrupts enabled)
 
         stacks.kernel_stack[capacity - 4] = 0; // r8
@@ -410,7 +410,7 @@ impl Thread {
                     current_process.virtual_address_space.copy_to_addr_space(
                         src_ptr,
                         &new_process.virtual_address_space,
-                        vma.range.start,
+                        &vma,
                         header.p_filesz,
                         true,
                     );

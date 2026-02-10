@@ -136,6 +136,7 @@ loader/towboot.efi
 nvdimm0
 rtl8139.dump
 towbootctl
+*.wad
 
 rustc-ice-*.txt
 .rustfmt.toml

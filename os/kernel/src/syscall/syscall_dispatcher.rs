@@ -85,7 +85,7 @@ pub fn init() {
     }
 
     // Set rip for syscall
-    LStar::write(VirtAddr::new(syscall_handler as u64));
+    LStar::write(VirtAddr::new(syscall_handler as *const () as u64));
 
     // Make sure interrupts are disabled during system calls
     // The CPU clears every flag that is set in the SFMask register

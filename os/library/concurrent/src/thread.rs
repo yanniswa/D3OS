@@ -83,7 +83,7 @@ extern "sysv64" fn kickoff_user_thread(entry: extern "sysv64" fn()) {
 }
 
 pub fn create(entry: fn()) -> Option<Thread> {
-    let res = syscall(SystemCall::ThreadCreate, &[kickoff_user_thread as usize,
+    let res = syscall(SystemCall::ThreadCreate, &[kickoff_user_thread as *const () as usize,
         entry as usize,]);
     match res {
         Ok(id) => Some(Thread::new(id)),

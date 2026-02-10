@@ -87,12 +87,12 @@ fn panic(info: &PanicInfo) -> ! {
     // this needs no allocations and should always work
     unsafe { logger().force_unlock() };
     error!("Panic:");
-    let args = [info.message().as_str().unwrap_or("(no message provided)")];
+    let args = info.message().as_str().unwrap_or("(no message provided)");
     let record = Record::builder()
         .level(Level::Error)
         .file(info.location().map(|l| l.file()))
         .line(info.location().map(|l| l.line()))
-        .args(Arguments::new_const(&args))
+        .args(Arguments::from_str_nonconst(args))
         .build();
 
     logger().log(&record);

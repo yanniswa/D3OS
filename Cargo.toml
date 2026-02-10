@@ -4,6 +4,7 @@ resolver = "2"
 members = [
     "os/kernel",
     "os/application/about",
+    "os/application/doom",
     "os/application/hello",
     "os/application/rpctest",
     "os/application/rpc_server",

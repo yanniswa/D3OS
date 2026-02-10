@@ -94,7 +94,7 @@ pub fn read(object_handle: usize, buffer: &mut [u8]) -> Result<usize, Errno> {
 
 /// Move the object pointer for the named object referenced by `object_handle` to the specified `offset` from the `origin`. \
 /// Returns `Ok(nr of bytes seeked)` or `Err`.
-pub fn seek(object_handle: usize, offset: usize, origin: SeekOrigin) -> Result<usize, Errno> {
+pub fn seek(object_handle: usize, offset: isize, origin: SeekOrigin) -> Result<usize, Errno> {
     open_objects::seek(object_handle, offset, origin)
 }
 

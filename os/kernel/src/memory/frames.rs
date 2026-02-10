@@ -10,6 +10,7 @@
    ║   - boot_avail         insert free frame region detected during boot    ║
    ║   - boot_reserve       reserve a range of frames during boot            ║
    ║   - frame_from_u64     convert a u64 address to a PhysFrame             ║
+   ║   - get_total_free_frames  return currently number of free frames       ║
    ╟─────────────────────────────────────────────────────────────────────────╢
    ║ Author: Fabian Ruhland and Michael Schoettner                           ║
    ║         Univ. Duesseldorf, 7.8.2025                                     ║
@@ -31,6 +32,18 @@ use x86_64::structures::paging::{PhysFrame, Size4KiB};
 use crate::memory::PAGE_SIZE;
 use crate::memory::dram;
 
+
+/// Return the total number of free frames currently available in the allocator.
+pub fn get_total_free_frames() -> usize {
+    let mut available: usize = 0;
+
+    let mut current = &PAGE_FRAME_ALLOCATOR.lock().head;
+    while let Some(block) = &current.next {
+        available += block.frame_count;
+        current = current.next.as_ref().unwrap();
+    }
+    available
+}
 
 static PAGE_FRAME_ALLOCATOR: Mutex<PageFrameListAllocator> =
     Mutex::new(PageFrameListAllocator::new());

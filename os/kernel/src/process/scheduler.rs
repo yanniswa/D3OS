@@ -29,18 +29,20 @@
 use crate::process::thread::{Thread, ThreadState};
 use crate::{allocator, apic, scheduler, timer, tss};
 use alloc::collections::VecDeque;
-use alloc::format;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use log::debug;
 use core::fmt::Write;
 use core::sync::atomic::AtomicUsize;
 use core::sync::atomic::Ordering::Relaxed;
 use core::{panic, ptr};
-use log::info;
 use smallmap::Map;
 use spin::{Mutex, MutexGuard};
 use syscall::return_vals::Errno;
+
+use crate::memory;
+use log::info;
 
 // thread IDs
 static THREAD_ID_COUNTER: AtomicUsize = AtomicUsize::new(1);
@@ -124,7 +126,42 @@ impl Scheduler {
 
     /// Return reference to thread identified by `thread_id`
     pub fn thread(&self, thread_id: usize) -> Option<Arc<Thread>> {
-        self.ready_state.lock().ready_queue.iter().find(|thread| thread.id() == thread_id).cloned()
+        debug!("Scheduler::thread: Searching for thread id {}", thread_id);
+        
+        // First check if it's the current thread
+        let state = self.ready_state.lock();
+        if let Some(current) = state.current_thread.as_ref() {
+            if current.id() == thread_id {
+                return Some(Arc::clone(current));
+            }
+        }
+        
+        // Check ready queue
+        if let Some(thread) = state.ready_queue
+            .iter()
+            .find(|thread| thread.id() == thread_id)
+            .cloned() {
+                return Some(thread);
+        }
+        drop(state);
+        
+        // Check sleep list
+        if let Some(thread) = self.sleep_list.lock()
+            .iter()
+            .find(|(thread, _)| thread.id() == thread_id)
+            .map(|(thread, _)| thread.clone()) {
+                return Some(thread);
+        }
+        
+        // Check blocked list
+        if let Some(thread) = self.blocked_list.lock()
+            .iter()
+            .find(|thread| thread.id() == thread_id)
+            .cloned() {
+                return Some(thread);
+        }
+        
+        None
     }
 
     /// Check if scheduler is initialized
@@ -377,6 +414,10 @@ impl Scheduler {
             join_map.remove(&current.id());
         }
        
+        
+        info!("kheap: free bytes    {}", memory::heap::get_free_bytes());
+        info!("frames: free frames #{}", memory::vmm::get_free_frames());
+
         drop(current); // Decrease Rc manually, because block() does not return
         self.block_and_switch(&mut ready_state);
         unreachable!()

@@ -15,7 +15,7 @@ use core::result::Result;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Once;
 use spin::rwlock::RwLock;
-use log::{info, warn};
+use log::info;
 
 use super::lookup;
 use super::traits::NamedObject;
@@ -106,16 +106,16 @@ pub(super) fn read(fh: usize, buf: &mut [u8]) -> Result<usize, Errno> {
     })
 }
 
-pub fn seek(fh: usize, offset: usize, origin: SeekOrigin) -> Result<usize, Errno> {
+pub fn seek(fh: usize, offset: isize, origin: SeekOrigin) -> Result<usize, Errno> {
     get_open_object_table().lookup_opened_object(fh).and_then(|opened_object| {
         if opened_object.named_object.is_file() {
             // Make `opened_object` mutable here
             return opened_object.named_object.as_file().and_then(|file| {
                 let new_pos = match origin {
                     SeekOrigin::Start => offset,
-                    SeekOrigin::End => file.stat()?.size + offset,
-                    SeekOrigin::Current => opened_object.pos.load(Ordering::SeqCst) + offset,
-                };
+                    SeekOrigin::End => file.stat()?.size as isize + offset,
+                    SeekOrigin::Current => opened_object.pos.load(Ordering::SeqCst) as isize + offset
+                } as usize;
                 opened_object.pos.store(new_pos, Ordering::SeqCst);
                 Ok(new_pos) // Success
             });
