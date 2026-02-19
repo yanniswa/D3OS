@@ -20,13 +20,13 @@ impl PipeTransport {
     }
 }
 
-fn writer_thread(msg: &[u8]) -> Option<Result<(), RpcError>> {
+fn writer_thread(path: &str, msg: &[u8]) -> Option<Result<(), RpcError>> {
     let thread = thread::current().unwrap();
     // Include process id (if available) and thread id in logs for tracing
     let pid = concurrent::process::current().map(|p| p.id()).unwrap_or(0);
-    debug!("writer_thread (pid={} tid={}): start, msg.len()={}", pid, thread.id(), msg.len());
+    debug!("writer_thread (pid={} tid={}): start, path={}, msg.len()={}", pid, thread.id(), path, msg.len());
 
-    let res = open("/myrpcpiperequest", OpenOptions::WRITEONLY);
+    let res = open(path, OpenOptions::WRITEONLY);
     if res.is_err() {
         error!("writer_thread (pid={} tid={}): open failed, error: {:?}", pid, thread.id(), res);
         return Some(Err(RpcError::PipeOpenFailed));
@@ -96,10 +96,10 @@ fn writer_thread(msg: &[u8]) -> Option<Result<(), RpcError>> {
 }
 
 impl Transport for PipeTransport {
-    fn send(&self, msg: &[u8]) -> Result<(), RpcError> {
+    fn send(&self, path: &str, msg: &[u8]) -> Result<(), RpcError> {
         // Perform the write from this thread (synchronous). If the writer
         // encounters an error, propagate it as Err(RpcError).
-        if let Some(res) = writer_thread(msg) {
+        if let Some(res) = writer_thread(path, msg) {
             return res;
         }
 

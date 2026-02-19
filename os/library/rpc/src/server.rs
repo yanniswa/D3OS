@@ -35,7 +35,7 @@ impl RpcServer {
             Ok(_) => {
                 // We successfully transitioned from false to true
                 info!("Starting RPC Server");
-                let res = mkfifo("/myrpcpiperequest");
+                let res = mkfifo(crate::consts::REQUEST_PIPE_PATH);
                 if res.is_err() {
                     error!("mkfifo failed: {:?}, server cannot start", res);
                     SERVER_STARTED.store(false, Ordering::SeqCst);
@@ -74,7 +74,7 @@ impl RpcServer {
         // This prevents deadlock where server blocks on open() while client waits for response
         // Made mutable to allow re-opening when all writers disconnect
         let mut request_fh = loop {
-            match open("/myrpcpiperequest", OpenOptions::READONLY) {
+            match open(crate::consts::REQUEST_PIPE_PATH, OpenOptions::READONLY) {
                 Ok(fh) => break fh,
                 Err(_) => {
                     // Pipe not ready, yield and retry
@@ -108,7 +108,7 @@ impl RpcServer {
 
                     // Re-open will block until a new writer opens the pipe
                     terminal::println!("Server: re-opening pipe, will block until next writer...");
-                    match open("/myrpcpiperequest", OpenOptions::READONLY) {
+                    match open(crate::consts::REQUEST_PIPE_PATH, OpenOptions::READONLY) {
                         Ok(new_fh) => {
                             request_fh = new_fh;
                             terminal::println!("Server: new writer connected, resuming...");

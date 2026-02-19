@@ -93,7 +93,7 @@ impl<T: Transport> HelloClient<T> {
             for &w in &words {
                 bytes_vec.extend_from_slice(&w.to_ne_bytes());
             }
-            self.transport.send(&bytes_vec)?;
+            self.transport.send(crate::consts::REQUEST_PIPE_PATH, &bytes_vec)?;
         }
 
         // Receive response
