@@ -100,7 +100,7 @@ pub struct Thread {
     /// the actual entry point (eg. for user threads the single parameter to kickoff)
     entry: extern "sysv64" fn(),
     state: AtomicU8,
-    wake_pending: AtomicBool, // false => allowed to block; true => do NOT block (wake pending)
+//    wake_pending: AtomicBool, // false => allowed to block; true => do NOT block (wake pending)
 }
 
 impl Stacks {
@@ -138,7 +138,7 @@ impl Thread {
             user_kickoff: VirtAddr::zero(),
             entry,
             state: AtomicU8::new(ThreadState::Created.as_u8()),
-            wake_pending: AtomicBool::new(false),
+  //          wake_pending: AtomicBool::new(false),
         };
 
         thread.prepare_kernel_stack();
@@ -158,7 +158,7 @@ impl Thread {
         let new_process = process_manager().write().create_process();
         let pid = new_process.id();
 
-        info!("load_application: pid = {pid}, name = {name}");
+        info!("*** load_application: pid = {pid}, name = {name}");
 
         // parse elf file headers and map and copy code if successful
         let entry = Thread::parse_and_map_elf_bin(&current_process, &new_process, elf_buffer, name)?;
@@ -205,9 +205,10 @@ impl Thread {
             user_kickoff: kickoff_addr,
             entry,
             state: AtomicU8::new(ThreadState::Created.as_u8()),
-            wake_pending: AtomicBool::new(false),
+   //         wake_pending: AtomicBool::new(false),
         };
 
+        info!("new_user_thread: pid = {pid}, tid = {tid}");
         thread.prepare_kernel_stack();
         Arc::new(thread)
     }
@@ -510,12 +511,12 @@ impl Thread {
 
     /// Get the current state of the thread
     pub fn state(&self) -> ThreadState {
-        ThreadState::from_u8(self.state.load(Ordering::Acquire))
+        ThreadState::from_u8(self.state.load(Ordering::SeqCst))
     }
 
     /// Set the current state of the thread
     pub fn set_state(&self, new: ThreadState) {
-        self.state.store(new.as_u8(), Ordering::Release);
+        self.state.store(new.as_u8(), Ordering::SeqCst);
     }
 
     /// Atomic state transition (very important)
@@ -524,7 +525,7 @@ impl Thread {
             .compare_exchange(expected.as_u8(), new.as_u8(), Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
     }
-
+/*
     /// Clear any previous wakeup state before attempting to block.
     /// After this point, a wakeup will set wake_pending=true in order to prevent blocking.
     pub fn reset_wake_pending(&self) {
@@ -548,6 +549,7 @@ impl Thread {
         // no wake pending -> block is allowed
         true
     }
+    */
 }
 
 /// Low-level function for starting a thread in kernel mode
@@ -665,7 +667,7 @@ pub enum ThreadState {
     Created,
     Ready,       // runnable, waiting to be scheduled
     Running,     // currently executing on a core
-    PreBlocking, // prepared to block
+    Parking,     // prepared to block
     Blocked,     // blocked
     Sleeping,    // sleeping for some time
     Exited,      // finished, waiting to be reaped
@@ -677,7 +679,7 @@ impl ThreadState {
             ThreadState::Created => 0,
             ThreadState::Ready => 1,
             ThreadState::Running => 2,
-            ThreadState::PreBlocking => 3,
+            ThreadState::Parking => 3,
             ThreadState::Blocked => 4,
             ThreadState::Sleeping => 5,
             ThreadState::Exited => 6,
@@ -689,7 +691,7 @@ impl ThreadState {
             0 => ThreadState::Created,
             1 => ThreadState::Ready,
             2 => ThreadState::Running,
-            3 => ThreadState::PreBlocking,
+            3 => ThreadState::Parking,
             4 => ThreadState::Blocked,
             5 => ThreadState::Sleeping,
             6 => ThreadState::Exited,

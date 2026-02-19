@@ -16,4 +16,6 @@ bench = false
 runtime = { path = "../../library/runtime" }
 rpc = { path = "../../library/rpc" }
 terminal = { path = "../../library/terminal" }
-
+log = "0.4.26"
+logger = { path = "../../library/logger" }
+spin = "0.9.8"

@@ -20,13 +20,37 @@ use rpc::server;
 use runtime::*;
 use spin::Mutex;
 use terminal::println;
+use core::sync::atomic::AtomicBool;
 
 pub mod mydata_capnp {
     include!("../mydata_capnp.rs");
 }
 
+
+use logger::Logger;
+use log::{info, SetLoggerError, LevelFilter};
+use spin::Once;
+
+static LOGGER: Once<Logger> = Once::new();
+
+pub fn logger() -> &'static Logger {
+    LOGGER.call_once(Logger::new)
+}
+
+
+pub fn init_logger() -> Result<(), SetLoggerError> {
+    log::set_logger(logger())
+        .map(|()| log::set_max_level(LevelFilter::Trace))
+}
+
+
+
+
+
 static SHARED_BYTES: Mutex<[u8; 512]> = Mutex::new([0u8; 512]);
-static READY: Mutex<bool> = Mutex::new(false);
+//static READY: Mutex<bool> = Mutex::new(false);
+static READY: AtomicBool = AtomicBool::new(false);
+
 
 pub fn writer_capnp() {
     // Call the simple HelloClient::say_hello for demonstration
@@ -52,13 +76,13 @@ pub fn writer_capnp() {
         Err(_) => println!("add failed"),
     }
 
-    sleep(10000);
+  //  sleep(10000);
     match client.add(10, 6) {
         Ok(sum) => println!("add returned: {}", sum),
         Err(_) => println!("add failed"),
     }
     let mut msg = Builder::new_default();
-
+println!("pos 1");
     {
         let mut root = msg.init_root::<mydata_capnp::my_data::Builder>();
         root.set_a(123);
@@ -71,11 +95,11 @@ pub fn writer_capnp() {
 
     capnp::serialize::write_message(cursor, &msg).unwrap();
 
-    *READY.lock() = true;
+    READY.store(true, core::sync::atomic::Ordering::SeqCst);
 }
 
 pub fn reader_capnp() -> Result<(u32, u64, String), capnp::Error> {
-    while !*READY.lock() {}
+    while !READY.load(core::sync::atomic::Ordering::SeqCst) {}
 
     let buffer = SHARED_BYTES.lock();
     let slice: &[u8] = &buffer[..];
@@ -95,10 +119,16 @@ pub fn reader_capnp() -> Result<(u32, u64, String), capnp::Error> {
 
 #[unsafe(no_mangle)]
 fn main() {
-    println!("hello app startet…");
+    println!("rpctest: app startet…");
+    init_logger();
+    info!("rpctest: logger activated");
+
     writer_capnp();
+    println!("************* ");
     match reader_capnp() {
         Ok((a, b, c)) => println!("gelesen: a={} b={} c={}", a, b, c),
         Err(_) => println!("Fehler beim Lesen"),
     }
 }
+
+

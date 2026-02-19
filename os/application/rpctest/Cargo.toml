@@ -21,6 +21,8 @@ capnp = { version = "0.13", default-features = false }
 rpc = { path = "../../library/rpc" }
 naming = { path = "../../library/naming" }
 syscall = { path = "../../library/syscall" }
+log = "0.4.26"
+logger = { path = "../../library/logger" }
 
 [build-dependencies]
 capnpc = "0.13"

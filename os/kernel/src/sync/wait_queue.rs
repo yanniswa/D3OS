@@ -6,12 +6,14 @@
    ║ Public functions:                                                       ║
    ║   - wait:       Blocks calling thread if the given predicate is true.   ║
    ║   - notify_one: Deblocks one waiting thread (if any).                   ║
+   ║   - notify_all: Deblocks all waiting threads (if any).                  ║
    ╟─────────────────────────────────────────────────────────────────────────╢
-   ║ Author: Michael Schoettner, Univ. Duesseldorf, 30.12.2025               ║
+   ║ Author: Michael Schoettner, Univ. Duesseldorf, 16.02.2026               ║
    ╚═════════════════════════════════════════════════════════════════════════╝
 */
 
 use alloc::collections::VecDeque;
+use log::info;
 
 use crate::scheduler;
 use crate::sync::irqsave_spinlock::IrqSaveSpinlock;
@@ -28,56 +30,80 @@ impl WaitQueue {
     }
 
     /// Block until `pred()` becomes true.
-    pub fn wait<F>(&self, mut pred: F)
+    pub fn wait<F>(&self, mut pred: F, message: &str)
     where
         F: FnMut() -> bool,
     {
-        // Because of spurious wakeups, we need to loop here.
-        loop {
-            // Check predicate without acquiring the queue lock
+//        info!("WaitQueue::wait");
+        let (pid, tid);
+        
+        // Take the queue lock synchronizing against `notify_one` and `notify_all`.
+        {
+            let mut quard = self.queue.lock(); // IRQs disabled & spinlocked here
+
             if pred() {
+                // Condition became true while we were getting the lock; don't sleep.
                 return;
             }
 
-            // Take the queue lock synchronizing against `notify_one`
-            {
-                let mut quard = self.queue.lock(); // IRQs disabled & spinlocked here
+            // Tell the scheduler to block us (which will be done later when threads are switched). 
+            // We will get our (pid, tid) needed for later `notify_one` and `notify_all` calls
+  //          info!("WaitQueue::wait: calling scheduler().block()");
+            
+            (pid, tid) = scheduler().block();
+  //          info!("WaitQueue::wait: scheduler().block() done, got PID={}, TID={}", pid, tid);
 
-                if pred() {
-                    // Condition became true while we were getting the lock; don't sleep.
-                    return;
-                }
+            // Enqueue ourselves as a waiter
+            quard.push_back((pid, tid));
 
-                // Get caller thread's (pid, tid)
-                let (pid, tid) = scheduler().current_ids();
+            // lock is dropped here => IRQs restored
+        }
 
-                // Enqueue ourselves as a waiter
-                quard.push_back((pid, tid));
+   //     info!("WaitQueue::wait: Thread with PID={}, TID={} is now waiting, message = {}", pid, tid, message);
 
-                // Mark the caller thread as blocked
-                scheduler().prepare_to_block();
-
-                // lock is dropped here => IRQs restored
+        // Check predicate without acquiring the queue lock. 
+        // The scheduler will block us, as long as no `notify_one` and `notify_all` have arrived
+        // But even after waking up we need to check for spurious wakeups, so we loop here.
+        loop {
+            if pred() {
+                return;
             }
-
-            // Yield the CPU to other threads. This must be outside the lock because we free cpu here.
-            scheduler().block_if_allowed();
-
-            // On wake, loop and check pred() again.
+            core::hint::spin_loop();   
         }
     }
 
     /// Wake up exactly one waiter (if any). Returns true if someone was woken up.
     pub fn notify_one(&self) -> bool {
+
+      //  info!("WaitQueue::notify_one");
+
         let mut guard = self.queue.lock();
 
         while let Some((pid, tid)) = guard.pop_front() {
             if scheduler().unblock(pid, tid) {
+               // info!("WaitQueue::notify_one: found a waiter");
                 return true;
             }
             // else: stale waiter (killed/exited) -> keep going
         }
+    //    info!("WaitQueue::notify_one: no waiter found");
 
         false
+    }
+
+    /// Wake up all waiters currently queued.
+    /// Returns the number of threads actually unblocked (stale entries are ignored).
+    pub fn notify_all(&self) -> usize {
+        let mut guard = self.queue.lock();
+        let mut woke = 0;
+
+        while let Some((pid, tid)) = guard.pop_front() {
+            if scheduler().unblock(pid, tid) {
+                woke += 1;
+            }
+            // else: stale waiter (killed/exited) -> ignore
+        }
+
+        woke
     }
 }
