@@ -42,12 +42,3 @@ struct AddResult {
   sum @0 :Int32;
 }
 
-# Legacy structures (for backwards compatibility)
-struct HelloRequest {
-  name @0 :Text;
-}
-
-struct HelloResponse {
-  reply @0 :Text;
-}
-

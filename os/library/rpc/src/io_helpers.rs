@@ -2,8 +2,6 @@
 extern crate alloc;
 use crate::consts::{MAX_READ_RETRIES, READ_TIMEOUT_MS};
 use crate::error::RpcError;
-use capnp::message::ReaderOptions;
-use capnp::serialize;
 use concurrent::thread;
 use log::{debug, error, trace};
 use naming::{read, write};

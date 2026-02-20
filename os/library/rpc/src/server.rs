@@ -1,5 +1,3 @@
-#![allow(unused_imports)]
-
 extern crate alloc;
 
 use crate::consts::SERVER_CLOSE_DELAY_MS;
@@ -11,7 +9,7 @@ use capnp::message::ReaderOptions;
 use capnp::serialize;
 use concurrent::thread;
 use core::sync::atomic::{AtomicBool, Ordering};
-use log::{debug, error, info, warn};
+use log::{debug, error, info};
 use naming::shared_types::OpenOptions;
 use naming::{close, mkfifo, open};
 
@@ -175,19 +173,10 @@ impl RpcServer {
                         }
                     }
                 }
-                Err(_) => {
-                    // Fall back to legacy HelloRequest format for backwards compatibility
-                    match message_reader.get_root::<hello_capnp::hello_request::Reader>() {
-                        Ok(req) => {
-                            let name = req.get_name().unwrap_or("unknown");
-                            debug!("RPC Request (legacy): say_hello('{}')", name);
-                            warn!("Received legacy HelloRequest without reply path - cannot send response");
-                        }
-                        Err(e) => error!("Failed to parse request: {:?}", e),
-                    }
+                Err(e) => {
+                    error!("Failed to parse RPC request root: {:?}", e);
                 }
             }
-            // Keep request_fh open for next request - don't close it here
             debug!("Server: request processed, waiting for next request");
         }
     }
