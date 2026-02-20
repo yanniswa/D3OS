@@ -1,13 +1,13 @@
 extern crate alloc;
 
-use crate::consts::CLIENT_CLOSE_DELAY_MS;
 use crate::error::RpcError;
 use crate::io_helpers::{read_raw_bytes_from_pipe, write_exact};
-use crate::transport::Transport;
+use crate::transport::{ClientTransport, Sender};
 use concurrent::thread;
 use log::{debug, error};
 use naming::shared_types::OpenOptions;
 use naming::{close, open};
+use crate::consts::CLIENT_CLOSE_DELAY_MS;
 
 pub struct PipeTransport {}
 
@@ -17,7 +17,7 @@ impl PipeTransport {
     }
 }
 
-impl Transport for PipeTransport {
+impl Sender for PipeTransport {
     fn send(&self, path: &str, msg: &[u8]) -> Result<(), RpcError> {
         let thread = thread::current().unwrap();
         let pid = concurrent::process::current().map(|p| p.id()).unwrap_or(0);
@@ -49,8 +49,10 @@ impl Transport for PipeTransport {
 
         Ok(())
     }
+}
 
-    fn receive<'a>(&self, out: &'a mut [u8], reply_path: &str) -> Result<usize, RpcError> {
+impl ClientTransport for PipeTransport {
+    fn receive(&self, out: &mut [u8], reply_path: &str) -> Result<usize, RpcError> {
         let thread = thread::current().unwrap();
         let pid = concurrent::process::current().map(|p| p.id()).unwrap_or(0);
 

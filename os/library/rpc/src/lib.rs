@@ -21,11 +21,16 @@ pub mod io_helpers;
 // Expose RPC method handlers
 pub mod handlers;
 
-// Expose transport module (contains the `Transport` trait) so submodules can import it.
-pub mod pipe_transport;
-pub mod server;
+// Expose transport module (contains Sender, ClientTransport, ServerTransport traits).
 pub mod transport;
+// Client-side pipe transport (implements Sender + ClientTransport)
+pub mod pipe_transport;
+// Server-side pipe transport (implements Sender + ServerTransport)
+pub mod server;
+pub mod server_pipe_transport;
 pub use pipe_transport::PipeTransport;
+pub use server_pipe_transport::ServerPipeTransport;
+pub use transport::{ClientTransport, Sender, ServerTransport};
 
 // Load client modules from the `client/` folder and re-export `HelloClient`.
 pub mod client {

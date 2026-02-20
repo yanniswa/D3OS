@@ -3,7 +3,7 @@ use crate::client::serializer::RpcSerializer;
 use crate::consts::MAX_RESPONSE_SIZE;
 use crate::error::RpcError;
 use crate::hello_capnp;
-use crate::transport::Transport;
+use crate::transport::ClientTransport;
 extern crate alloc;
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -49,12 +49,12 @@ static REPLY_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 ///
 /// That's it! All the boilerplate (serialization, transport, error handling) is handled
 /// by `call_method()` and `parse_response()`.
-pub struct HelloClient<T: Transport> {
+pub struct HelloClient<T: ClientTransport> {
     transport: T,
     serializer: RpcSerializer,
 }
 
-impl<T: Transport> HelloClient<T> {
+impl<T: ClientTransport> HelloClient<T> {
     pub fn new(transport: T) -> Self {
         Self {
             transport,

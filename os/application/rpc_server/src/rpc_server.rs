@@ -6,6 +6,7 @@ use runtime::*;
 use log::{LevelFilter, SetLoggerError, info};
 use logger::Logger;
 use rpc::server::RpcServer;
+use rpc::server_pipe_transport::ServerPipeTransport;
 use spin::Once;
 use terminal::println;
 
@@ -27,6 +28,14 @@ pub fn main() {
 
     info!("rpc_server: logger initialized *********");
 
-    RpcServer::init();
+    let transport = match ServerPipeTransport::create(rpc::consts::REQUEST_PIPE_PATH) {
+        Ok(t) => t,
+        Err(e) => {
+            println!("rpc_server: failed to create transport: {:?}", e);
+            return;
+        }
+    };
+    let mut server = RpcServer::with_transport(transport);
+    let _ = server.run();
     println!("rpc_server: ended");
 }
