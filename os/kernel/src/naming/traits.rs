@@ -12,13 +12,12 @@
    ╚═════════════════════════════════════════════════════════════════════════╝
 */
 
-
 use alloc::sync::Arc;
 use core::fmt::{self, Debug};
 use core::result::Result;
 
 use super::stat::{Mode, Stat};
-use naming::shared_types::{OpenOptions, DirEntry};
+use naming::shared_types::{DirEntry, OpenOptions};
 use syscall::return_vals::Errno;
 
 /// FileSystem operations
@@ -42,13 +41,13 @@ pub trait PipeObject: Debug + Send + Sync {
     fn close(&self, flags: OpenOptions);
 }
 
-
 /// Directory object operations
 pub trait DirectoryObject: Debug + Send + Sync {
     fn lookup(&self, name: &str) -> Result<NamedObject, Errno>;
     fn create_file(&self, _name: &str, _mode: Mode) -> Result<NamedObject, Errno>;
     fn create_dir(&self, _name: &str, _mode: Mode) -> Result<NamedObject, Errno>;
     fn create_pipe(&self, _name: &str, _mode: Mode) -> Result<NamedObject, Errno>;
+    fn unlink(&self, _name: &str) -> Result<(), Errno>;
     #[allow(dead_code)]
     fn stat(&self) -> Result<Stat, Errno>;
     fn readdir(&self, index: usize) -> Result<Option<DirEntry>, Errno>;
@@ -86,7 +85,7 @@ impl NamedObject {
             _ => Err(Errno::EBADF),
         }
     }
-    
+
     /// Returns `true` if it's a file.
     #[allow(dead_code)]
     pub fn is_file(&self) -> bool {
@@ -136,4 +135,3 @@ impl From<Arc<dyn DirectoryObject>> for NamedObject {
 pub fn as_named_object(dir: Arc<dyn DirectoryObject>) -> NamedObject {
     NamedObject::DirectoryObject(dir)
 }
-

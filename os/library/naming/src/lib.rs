@@ -156,3 +156,11 @@ pub fn mkfifo(path: &str) -> Result<usize, Errno> {
         Err(_) => Err(Errno::EBADSTR),
     }
 }
+
+#[cfg(feature = "userspace")]
+pub fn unlink(path: &str) -> Result<usize, Errno> {
+    match CString::new(path) {
+        Ok(c_path) => syscall(SystemCall::Unlink, &[c_path.as_bytes().as_ptr() as usize]),
+        Err(_) => Err(Errno::EBADSTR),
+    }
+}

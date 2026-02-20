@@ -60,6 +60,7 @@ pub enum SystemCall {
     SockClose,
     GetIpAddresses,
     Mkfifo,
+    Unlink,
     WriteGraphic,
     GetGraphicResolution,
     MouseRead,

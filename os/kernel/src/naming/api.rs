@@ -281,3 +281,21 @@ pub fn mkfifo(path: &str) -> Result<usize, Errno> {
         }
     }
 }
+
+/// Remove a named object (file or pipe) at `path` from its parent directory. \
+/// Returns `Ok(0)` or `Err(errno)`
+pub fn unlink(path: &str) -> Result<usize, Errno> {
+    let mut components: Vec<&str> = path.split('/').collect();
+    let name = match components.pop() {
+        Some(n) if !n.is_empty() => n,
+        _ => return Err(Errno::EINVAL),
+    };
+    let parent_dir = if components.len() <= 1 {
+        "/".to_string()
+    } else {
+        components.join("/")
+    };
+    lookup::lookup_dir(&parent_dir)
+        .and_then(|dir| dir.unlink(name))
+        .map(|_| 0usize)
+}

@@ -94,6 +94,9 @@ impl<T: Transport> HelloClient<T> {
         let mut out = [0u8; MAX_RESPONSE_SIZE];
         let n = self.transport.receive(&mut out, &reply_path)?;
 
+        // Clean up the reply pipe from the naming service to free its memory.
+        let _ = unlink(&reply_path);
+
         Ok(out[..n].to_vec())
     }
 

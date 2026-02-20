@@ -31,7 +31,7 @@ use super::sys_input::{sys_read_keyboard, sys_read_mouse};
 use super::sys_logger::sys_log;
 use super::sys_naming::{
     sys_close, sys_cd, sys_cwd, sys_mkdir, sys_mkfifo, sys_open, sys_read,
-    sys_readdir, sys_seek, sys_touch, sys_write,
+    sys_readdir, sys_seek, sys_touch, sys_unlink, sys_write,
 };
 use super::sys_net::{
     sys_sock_accept, sys_sock_bind, sys_sock_close, sys_sock_connect,
@@ -154,6 +154,7 @@ impl SyscallTable {
                 sys_sock_close as *const _,
                 sys_get_ip_adresses as *const _,
                 sys_mkfifo as *const _,
+                sys_unlink as *const _,
                 sys_write_graphic as *const _,
                 sys_get_graphic_resolution as *const _,
                 sys_read_mouse as *const _,

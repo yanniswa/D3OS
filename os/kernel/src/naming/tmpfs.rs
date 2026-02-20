@@ -173,6 +173,16 @@ impl DirectoryObject for Dir {
         Ok((inode as Arc<dyn DirectoryObject>).into())
     }
 
+    fn unlink(&self, name: &str) -> Result<(), Errno> {
+        let mut dir_lock = self.0.write();
+        if let Some(pos) = dir_lock.files.iter().position(|(n, _)| n == name) {
+            dir_lock.files.remove(pos);
+            Ok(())
+        } else {
+            Err(Errno::ENOENT)
+        }
+    }
+
     fn stat(&self) -> Result<Stat, Errno> {
         Ok(self.0.read().stat)
     }
@@ -371,7 +381,6 @@ impl Pipe {
 }
 
 impl PipeObject for Pipe {
-
     fn open(&self, flags: OpenOptions) -> Result<usize, Errno> {
         let guard = self.mutex.lock();
         //let (pid, tid) = scheduler().current_ids();
@@ -384,7 +393,7 @@ impl PipeObject for Pipe {
                     return Err(Errno::EBUSY);
                 }
                 self.has_reader.store(true, Ordering::SeqCst);
-                
+
                 self.wx_wq.notify_one();
 
                 drop(guard); // release lock before blocking
@@ -415,10 +424,9 @@ impl PipeObject for Pipe {
 
     /// Read from pipe buffer, `offset` is ignored
     fn read(&self, buf: &mut [u8], _offset: usize, options: OpenOptions) -> Result<usize, Errno> {
-
         // Debug output
         //let (pid, tid) = scheduler().current_ids();
-       // info!("read: pid={}, tid={}", pid, tid);
+        // info!("read: pid={}, tid={}", pid, tid);
 
         // check if pipe was opened for reading
         if options == OpenOptions::WRITEONLY {
@@ -439,7 +447,7 @@ impl PipeObject for Pipe {
         }
 
         // From here we read data
-        // We have data but the writer might have gone or leaves concurrently 
+        // We have data but the writer might have gone or leaves concurrently
 
         let total_to_read = buf.len();
         let mut total_read = 0;
@@ -459,7 +467,6 @@ impl PipeObject for Pipe {
                     total_read += 1;
                 }
                 Err(_) => {
-
                     // We consumed all available data but need more
                     // We block until more data is available or the writer has gone (-> EOF)
                     self.rx_wq.wait(|| self.has_data() || !self.has_writer(), "read: blocks");
@@ -470,18 +477,17 @@ impl PipeObject for Pipe {
             }
         }
 
-        // If we read at least one byte we freed space 
+        // If we read at least one byte we freed space
         // -> wake potentially blocked writer
         if total_read > 0 {
             self.wx_wq.notify_one();
-        } 
+        }
 
         Ok(total_read)
     }
 
     /// Write to pipe buffer, `offset` is ignored
     fn write(&self, buf: &[u8], _offset: usize, options: OpenOptions) -> Result<usize, Errno> {
-
         // Debug output
         //let (pid, tid) = scheduler().current_ids();
         //info!("write: pid={}, tid={}", pid, tid);
@@ -505,7 +511,7 @@ impl PipeObject for Pipe {
         }
 
         // From here we write data
-        // We have space but the reader might leave concurrently 
+        // We have space but the reader might leave concurrently
         let total_to_write: usize = buf.len();
         let mut total_written = 0;
         let pq = self.pq.read();
@@ -523,13 +529,12 @@ impl PipeObject for Pipe {
                     total_written += 1;
                 }
                 Err(_) => {
-
                     // We consumed all available space but need more
                     // We block until more space is available or the reader has gone (-> EOF)
                     self.wx_wq.wait(|| self.has_space() || !self.has_reader(), "write: blocks");
                     if !self.has_reader() {
                         return Err(Errno::EPIPE);
-                    } 
+                    }
                 }
             }
         }
@@ -538,7 +543,7 @@ impl PipeObject for Pipe {
         if total_written > 0 {
             //info!("PipeObject::write: done, total_written={}, notify_one, pid={}, tid={}", total_written, pid, tid);
             self.rx_wq.notify_one();
-        } 
+        }
         Ok(total_written)
     }
 
@@ -563,7 +568,7 @@ impl PipeObject for Pipe {
         }
 
         if !self.has_reader() && !self.has_writer() {
-           // info!("PipeObject::close: fully closed, pid={}, tid={}", pid, tid);
+            // info!("PipeObject::close: fully closed, pid={}, tid={}", pid, tid);
             let (rx, wx) = mpmc::bounded::scq::queue(PIPE_SIZE);
             let mut pq = self.pq.write();
             pq.rx = rx;
