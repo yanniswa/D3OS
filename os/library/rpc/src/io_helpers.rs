@@ -1,6 +1,9 @@
 /// I/O helper functions for RPC communication over pipes
+extern crate alloc;
 use crate::consts::{MAX_READ_RETRIES, READ_TIMEOUT_MS};
 use crate::error::RpcError;
+use capnp::message::ReaderOptions;
+use capnp::serialize;
 use concurrent::thread;
 use log::{debug, error, trace};
 use naming::{read, write};
@@ -139,4 +142,66 @@ pub fn write_exact(fh: usize, buf: &[u8]) -> Result<(), RpcError> {
 
     debug!("write_exact: completed {} bytes fh={}", buf.len(), fh);
     Ok(())
+}
+
+/// Read a single Cap'n Proto message from a FIFO handle.
+///
+/// Reads a Cap'n Proto message from a pipe and returns the raw framed bytes.
+///
+/// This is the lower-level counterpart to `read_message_from_pipe`: it reads
+/// the same wire format but returns the assembled byte buffer instead of a
+/// parsed `Reader`.  Use this when you need to hand the bytes to a caller who
+/// will deserialize them separately (e.g. `Transport::receive`).
+pub fn read_raw_bytes_from_pipe(fh: usize) -> Result<alloc::vec::Vec<u8>, RpcError> {
+    use crate::consts::{MAX_CAPNP_SEGMENTS, MAX_SEGMENT_TABLE_SIZE};
+    use alloc::vec;
+
+    // --- segment count (4 bytes) ---
+    let mut seg_count_buf = [0u8; 4];
+    read_exact(fh, &mut seg_count_buf)?;
+    let segment_count = u32::from_le_bytes(seg_count_buf).wrapping_add(1) as usize;
+    if segment_count == 0 || segment_count > MAX_CAPNP_SEGMENTS {
+        error!("read_raw_bytes_from_pipe: invalid segment_count={}", segment_count);
+        return Err(RpcError::InvalidSegmentCount);
+    }
+
+    // --- segment size table ---
+    let sizes_len = segment_count * 4;
+    let mut sizes_buf = [0u8; MAX_SEGMENT_TABLE_SIZE];
+    if sizes_len > sizes_buf.len() {
+        return Err(RpcError::InvalidSegmentCount);
+    }
+    read_exact(fh, &mut sizes_buf[..sizes_len])?;
+
+    let mut total_words = 0usize;
+    for i in 0..segment_count {
+        let w = u32::from_le_bytes([sizes_buf[i * 4], sizes_buf[i * 4 + 1], sizes_buf[i * 4 + 2], sizes_buf[i * 4 + 3]]) as usize;
+        total_words += w;
+    }
+
+    // --- optional 4-byte padding ---
+    let padding = if segment_count % 2 == 0 { 4 } else { 0 };
+    if padding > 0 {
+        let mut pad_buf = [0u8; 4];
+        read_exact(fh, &mut pad_buf)?;
+    }
+
+    // --- message data ---
+    let total_bytes = total_words * 8;
+    let mut data_buf = vec![0u8; total_bytes];
+    if total_bytes > 0 {
+        read_exact(fh, &mut data_buf)?;
+    }
+
+    // Re-assemble the canonical framed byte stream
+    let header_size = 4 + sizes_len + padding;
+    let mut flat: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(header_size + total_bytes);
+    flat.extend_from_slice(&seg_count_buf);
+    flat.extend_from_slice(&sizes_buf[..sizes_len]);
+    if padding > 0 {
+        flat.extend(core::iter::repeat(0u8).take(padding));
+    }
+    flat.extend_from_slice(&data_buf);
+
+    Ok(flat)
 }

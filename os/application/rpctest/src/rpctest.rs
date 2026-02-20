@@ -12,6 +12,7 @@ use concurrent::{
     process,
     thread::{self, sleep},
 };
+use core::sync::atomic::AtomicBool;
 use naming::mkfifo;
 use rpc::HelloClient;
 use rpc::PipeTransport;
@@ -20,15 +21,13 @@ use rpc::server;
 use runtime::*;
 use spin::Mutex;
 use terminal::println;
-use core::sync::atomic::AtomicBool;
 
 pub mod mydata_capnp {
     include!("../mydata_capnp.rs");
 }
 
-
+use log::{LevelFilter, SetLoggerError, info};
 use logger::Logger;
-use log::{info, SetLoggerError, LevelFilter};
 use spin::Once;
 
 static LOGGER: Once<Logger> = Once::new();
@@ -37,20 +36,13 @@ pub fn logger() -> &'static Logger {
     LOGGER.call_once(Logger::new)
 }
 
-
 pub fn init_logger() -> Result<(), SetLoggerError> {
-    log::set_logger(logger())
-        .map(|()| log::set_max_level(LevelFilter::Trace))
+    log::set_logger(logger()).map(|()| log::set_max_level(LevelFilter::Trace))
 }
-
-
-
-
 
 static SHARED_BYTES: Mutex<[u8; 512]> = Mutex::new([0u8; 512]);
 //static READY: Mutex<bool> = Mutex::new(false);
 static READY: AtomicBool = AtomicBool::new(false);
-
 
 pub fn writer_capnp() {
     // Call the simple HelloClient::say_hello for demonstration
@@ -76,13 +68,13 @@ pub fn writer_capnp() {
         Err(_) => println!("add failed"),
     }
 
-  //  sleep(10000);
+    //  sleep(10000);
     match client.add(10, 6) {
         Ok(sum) => println!("add returned: {}", sum),
         Err(_) => println!("add failed"),
     }
     let mut msg = Builder::new_default();
-println!("pos 1");
+    println!("pos 1");
     {
         let mut root = msg.init_root::<mydata_capnp::my_data::Builder>();
         root.set_a(123);
@@ -129,6 +121,6 @@ fn main() {
         Ok((a, b, c)) => println!("gelesen: a={} b={} c={}", a, b, c),
         Err(_) => println!("Fehler beim Lesen"),
     }
+
+    sleep(100);
 }
-
-

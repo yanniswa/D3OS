@@ -2,17 +2,16 @@
 
 extern crate alloc;
 
-use crate::consts::{MAX_PAYLOAD_SIZE, SERVER_CLOSE_DELAY_MS};
+use crate::consts::SERVER_CLOSE_DELAY_MS;
 use crate::error::RpcError;
 use crate::handlers;
-use crate::io_helpers::{read_exact, write_exact};
-use alloc::vec;
+use crate::io_helpers::{read_raw_bytes_from_pipe, write_exact};
 use alloc::vec::Vec;
 use capnp::message::ReaderOptions;
 use capnp::serialize;
 use concurrent::thread;
 use core::sync::atomic::{AtomicBool, Ordering};
-use log::{debug, error, info, trace, warn};
+use log::{debug, error, info, warn};
 use naming::shared_types::OpenOptions;
 use naming::{close, mkfifo, open};
 
@@ -94,146 +93,102 @@ impl RpcServer {
                 return Ok(());
             }
 
-            // Read 4-byte length prefix
-            let mut len_buf = [0u8; 4];
-            match read_exact(request_fh, &mut len_buf) {
-                Ok(()) => {
-                    terminal::println!("Server: read 4-byte length prefix successfully");
-                }
+            // Read next Cap'n Proto message directly from the pipe using
+            // the standard framing (same as client send and server send_response).
+            // read_message blocks until data is available or returns an error.
+            let flat = match read_raw_bytes_from_pipe(request_fh) {
+                Ok(b) => b,
                 Err(RpcError::UnexpectedEof) | Err(RpcError::ReadFailed) => {
-                    // EOF or ReadFailed means no writer - close and re-open pipe to block until next writer
-                    // This prevents busy-looping and properly waits for the next client
-                    terminal::println!("Server: No writer detected - closing and re-opening pipe...");
+                    // No writer on the pipe — close and re-open to block until next client.
+                    debug!("Server: pipe EOF/ReadFailed — re-opening request pipe");
                     let _ = close(request_fh);
-
-                    // Re-open will block until a new writer opens the pipe
-                    terminal::println!("Server: re-opening pipe, will block until next writer...");
                     match open(crate::consts::REQUEST_PIPE_PATH, OpenOptions::READONLY) {
                         Ok(new_fh) => {
                             request_fh = new_fh;
-                            terminal::println!("Server: new writer connected, resuming...");
                             continue;
                         }
-                        Err(e) => {
-                            terminal::println!("Server: FATAL - failed to re-open request pipe: {:?}", e);
-                            return Err(RpcError::PipeOpenFailed);
-                        }
+                        Err(_) => return Err(RpcError::PipeOpenFailed),
                     }
                 }
                 Err(RpcError::Timeout) => {
-                    // Timeout waiting for data - just continue waiting
-                    terminal::println!("Server: read timeout, continuing to wait for requests...");
                     continue;
                 }
                 Err(e) => {
-                    terminal::println!("Server: FATAL - error reading from request pipe: {:?}", e);
+                    error!("Server: fatal read error: {:?}", e);
                     let _ = close(request_fh);
                     return Err(e);
                 }
-            }
+            };
 
-            let payload_len = u32::from_le_bytes(len_buf) as usize;
-
-            if payload_len == 0 || payload_len > MAX_PAYLOAD_SIZE {
-                error!("Invalid payload length: {} (max: {})", payload_len, MAX_PAYLOAD_SIZE);
-                continue;
-            }
-
-            // Allocate buffer for payload
-            // TODO: Add proper heap space check to prevent OOM
-            let mut buf = vec![0u8; payload_len];
-            match read_exact(request_fh, &mut buf) {
-                Ok(()) => {}
-                Err(RpcError::UnexpectedEof) => {
-                    warn!("EOF while reading payload - incomplete request");
-                    continue;
-                }
+            // Deserialize locally — Reader lifetime is bounded to this loop iteration.
+            let mut flat_slice: &[u8] = &flat;
+            let message_reader = match serialize::read_message_from_flat_slice(&mut flat_slice, ReaderOptions::new()) {
+                Ok(r) => r,
                 Err(e) => {
-                    error!("Failed to read payload: {:?}, continuing server loop", e);
+                    error!("Server: deserialize failed: {:?}", e);
                     continue;
                 }
-            }
+            };
 
-            // Parse Cap'n Proto message and dispatch to appropriate method
-            if buf.len() > 0 {
-                let mut slice: &[u8] = &buf[..];
-                match serialize::read_message_from_flat_slice(&mut slice, ReaderOptions::new()) {
-                    Ok(message_reader) => {
-                        // Try new RpcRequest format first
-                        match message_reader.get_root::<hello_capnp::rpc_request::Reader>() {
-                            Ok(req) => {
-                                let reply_path = req.get_reply_path().unwrap_or("");
-
-                                // Dispatch based on method
-                                match req.get_method().which() {
-                                    Ok(hello_capnp::rpc_request::method::SayHello(params)) => {
-                                        match params {
-                                            Ok(p) => {
-                                                let name: &str = p.get_name().unwrap_or("unknown");
-                                                debug!("RPC Request: sayHello('{}'')", name);
-
-                                                // Call handler and build response
-                                                let greeting = handlers::say_hello(name);
-                                                Self::send_response(reply_path, |msg_builder| {
-                                                    let response = msg_builder.init_root::<hello_capnp::rpc_response::Builder>();
-                                                    let mut result = response.get_result().init_say_hello_result();
-                                                    result.set_greeting(&greeting);
-                                                });
-                                            }
-                                            Err(e) => {
-                                                error!("Failed to get sayHello params: {:?}", e);
-                                                Self::send_error(reply_path, "Invalid sayHello parameters");
-                                            }
-                                        }
-                                    }
-                                    Ok(hello_capnp::rpc_request::method::Add(params)) => {
-                                        match params {
-                                            Ok(p) => {
-                                                let a: i32 = p.get_a();
-                                                let b: i32 = p.get_b();
-                                                debug!("RPC Request: add({}, {})", a, b);
-
-                                                // Call handler and build response
-                                                let sum = handlers::add(a, b);
-                                                Self::send_response(reply_path, |msg_builder| {
-                                                    let response = msg_builder.init_root::<hello_capnp::rpc_response::Builder>();
-                                                    let mut result = response.get_result().init_add_result();
-                                                    result.set_sum(sum);
-                                                });
-
-                                                debug!("RPC: add({}, {}) = {}", a, b, sum);
-                                            }
-                                            Err(e) => {
-                                                error!("Failed to get add params: {:?}", e);
-                                                Self::send_error(reply_path, "Invalid add parameters");
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        error!("Unknown method in RPC request: {:?}", e);
-                                        Self::send_error(reply_path, "Unknown method");
-                                    }
-                                }
+            // Dispatch the parsed Cap'n Proto message.
+            match message_reader.get_root::<hello_capnp::rpc_request::Reader>() {
+                Ok(req) => {
+                    let reply_path = req.get_reply_path().unwrap_or("");
+                    match req.get_method().which() {
+                        Ok(hello_capnp::rpc_request::method::SayHello(params)) => match params {
+                            Ok(p) => {
+                                let name: &str = p.get_name().unwrap_or("unknown");
+                                debug!("RPC Request: sayHello('{}')", name);
+                                let greeting = handlers::say_hello(name);
+                                Self::send_response(reply_path, |msg_builder| {
+                                    let response = msg_builder.init_root::<hello_capnp::rpc_response::Builder>();
+                                    let mut result = response.get_result().init_say_hello_result();
+                                    result.set_greeting(&greeting);
+                                });
                             }
-                            Err(_) => {
-                                // Fall back to legacy HelloRequest format for backwards compatibility
-                                match message_reader.get_root::<hello_capnp::hello_request::Reader>() {
-                                    Ok(req) => {
-                                        let name = req.get_name().unwrap_or("unknown");
-                                        debug!("RPC Request (legacy): say_hello('{}')", name);
-                                        // Legacy format doesn't have reply_path - cannot send response
-                                        warn!("Received legacy HelloRequest without reply path - cannot send response");
-                                    }
-                                    Err(e) => error!("Failed to parse request: {:?}", e),
-                                }
+                            Err(e) => {
+                                error!("Failed to get sayHello params: {:?}", e);
+                                Self::send_error(reply_path, "Invalid sayHello parameters");
                             }
+                        },
+                        Ok(hello_capnp::rpc_request::method::Add(params)) => match params {
+                            Ok(p) => {
+                                let a: i32 = p.get_a();
+                                let b: i32 = p.get_b();
+                                debug!("RPC Request: add({}, {})", a, b);
+                                let sum = handlers::add(a, b);
+                                Self::send_response(reply_path, |msg_builder| {
+                                    let response = msg_builder.init_root::<hello_capnp::rpc_response::Builder>();
+                                    let mut result = response.get_result().init_add_result();
+                                    result.set_sum(sum);
+                                });
+                                debug!("RPC: add({}, {}) = {}", a, b, sum);
+                            }
+                            Err(e) => {
+                                error!("Failed to get add params: {:?}", e);
+                                Self::send_error(reply_path, "Invalid add parameters");
+                            }
+                        },
+                        Err(e) => {
+                            error!("Unknown method in RPC request: {:?}", e);
+                            Self::send_error(reply_path, "Unknown method");
                         }
                     }
-                    Err(e) => error!("Failed to deserialize message: {:?}", e),
+                }
+                Err(_) => {
+                    // Fall back to legacy HelloRequest format for backwards compatibility
+                    match message_reader.get_root::<hello_capnp::hello_request::Reader>() {
+                        Ok(req) => {
+                            let name = req.get_name().unwrap_or("unknown");
+                            debug!("RPC Request (legacy): say_hello('{}')", name);
+                            warn!("Received legacy HelloRequest without reply path - cannot send response");
+                        }
+                        Err(e) => error!("Failed to parse request: {:?}", e),
+                    }
                 }
             }
             // Keep request_fh open for next request - don't close it here
-            terminal::println!("Server: request processed, looping back for next request...");
+            debug!("Server: request processed, waiting for next request");
         }
     }
 
@@ -242,31 +197,27 @@ impl RpcServer {
     where
         F: FnOnce(&mut capnp::message::Builder<capnp::message::HeapAllocator>),
     {
+        let mut msg_builder = capnp::message::Builder::new_default();
+        build_response(&mut msg_builder);
+
+        let mut tmp_buf = Vec::new();
+        if let Err(e) = serialize::write_message(&mut tmp_buf, &msg_builder) {
+            error!("Failed to serialize response: {:?}", e);
+            return;
+        }
+
+        // Use the same pipe-open / write / close pattern as writer_thread so
+        // the client receive side sees identical Cap'n Proto framing.
         match open(reply_path, OpenOptions::WRITEONLY) {
             Ok(reply_fh) => {
-                let mut msg_builder = capnp::message::Builder::new_default();
-                build_response(&mut msg_builder);
-
-                let mut tmp_buf = Vec::new();
-                if let Err(e) = serialize::write_message(&mut tmp_buf, &msg_builder) {
-                    error!("Failed to serialize response: {:?}", e);
-                    let _ = close(reply_fh);
-                    return;
-                }
-
                 if let Err(e) = write_exact(reply_fh, &tmp_buf) {
                     error!("Failed to write response: {:?}", e);
-                    let _ = close(reply_fh);
-                    return;
                 }
-
                 thread::sleep(SERVER_CLOSE_DELAY_MS);
                 let _ = close(reply_fh);
-                debug!("RPC Response sent: {} bytes", tmp_buf.len());
+                debug!("RPC Response sent: {} bytes to {}", tmp_buf.len(), reply_path);
             }
-            Err(_) => {
-                error!("Failed to open reply pipe: {}", reply_path);
-            }
+            Err(_) => error!("Failed to open reply pipe: {}", reply_path),
         }
     }
 

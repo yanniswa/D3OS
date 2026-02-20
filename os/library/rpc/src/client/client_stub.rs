@@ -1,3 +1,4 @@
+/// by `call_method()` and `parse_response()`.
 use crate::consts::MAX_RESPONSE_SIZE;
 use crate::error::RpcError;
 use crate::transport::Transport;
@@ -8,7 +9,7 @@ use alloc::vec::Vec;
 use core::str;
 use core::sync::atomic::{AtomicU64, Ordering};
 use log::{debug, error};
-use naming::mkfifo;
+use naming::{mkfifo, unlink};
 
 use capnp::message::Builder;
 use capnp::serialize;
@@ -16,8 +17,6 @@ use capnp::serialize;
 use crate::hello_capnp;
 
 // Global monotonic counter for generating unique reply paths
-// Uses u64 to guarantee no overflow in production (2^64 calls = 584 billion years at 1M req/s)
-// Combined with PID ensures uniqueness across process restarts
 static REPLY_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// RPC Client stub for type-safe remote procedure calls
@@ -84,15 +83,10 @@ impl<T: Transport> HelloClient<T> {
         let mut message = Builder::new_default();
         build_request(&mut message, &reply_path);
 
-        // Serialize and send
-        let words = serialize::write_message_to_words(&message);
-        let bytes_len = words.len() * core::mem::size_of::<capnp::Word>();
-
-        if bytes_len > 0 {
-            let mut bytes_vec: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(bytes_len);
-            for &w in &words {
-                bytes_vec.extend_from_slice(&w.to_ne_bytes());
-            }
+        // Serialize to standard Cap'n Proto framing and send.
+        let mut bytes_vec: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+        serialize::write_message(&mut bytes_vec, &message).map_err(|_| RpcError::DeserializationFailed)?;
+        if !bytes_vec.is_empty() {
             self.transport.send(crate::consts::REQUEST_PIPE_PATH, &bytes_vec)?;
         }
 
