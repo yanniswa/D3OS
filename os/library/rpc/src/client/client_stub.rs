@@ -1,20 +1,16 @@
 /// by `call_method()` and `parse_response()`.
+use crate::client::serializer::RpcSerializer;
 use crate::consts::MAX_RESPONSE_SIZE;
 use crate::error::RpcError;
+use crate::hello_capnp;
 use crate::transport::Transport;
 extern crate alloc;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use core::str;
 use core::sync::atomic::{AtomicU64, Ordering};
 use log::{debug, error};
 use naming::{mkfifo, unlink};
-
-use capnp::message::Builder;
-use capnp::serialize;
-
-use crate::hello_capnp;
 
 // Global monotonic counter for generating unique reply paths
 static REPLY_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -55,11 +51,15 @@ static REPLY_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 /// by `call_method()` and `parse_response()`.
 pub struct HelloClient<T: Transport> {
     transport: T,
+    serializer: RpcSerializer,
 }
 
 impl<T: Transport> HelloClient<T> {
     pub fn new(transport: T) -> Self {
-        Self { transport }
+        Self {
+            transport,
+            serializer: RpcSerializer::new(),
+        }
     }
 
     /// Generate unique reply path for this RPC call
@@ -77,17 +77,11 @@ impl<T: Transport> HelloClient<T> {
         let reply_path = Self::generate_reply_path();
         debug!("{}: generated unique reply path: {}", method_name, reply_path);
 
-        // Create reply FIFO
         let _ = mkfifo(&reply_path);
 
-        let mut message = Builder::new_default();
-        build_request(&mut message, &reply_path);
-
-        // Serialize to standard Cap'n Proto framing and send.
-        let mut bytes_vec: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
-        serialize::write_message(&mut bytes_vec, &message).map_err(|_| RpcError::DeserializationFailed)?;
-        if !bytes_vec.is_empty() {
-            self.transport.send(crate::consts::REQUEST_PIPE_PATH, &bytes_vec)?;
+        let bytes = self.serializer.serialize_request(&reply_path, build_request)?;
+        if !bytes.is_empty() {
+            self.transport.send(crate::consts::REQUEST_PIPE_PATH, &bytes)?;
         }
 
         // Receive response
@@ -111,37 +105,7 @@ impl<T: Transport> HelloClient<T> {
     where
         F: FnOnce(hello_capnp::rpc_response::result::Reader) -> Result<R, RpcError>,
     {
-        let mut response_slice: &[u8] = &response_bytes[..];
-
-        // Deserialize message
-        let reader = serialize::read_message_from_flat_slice(&mut response_slice, capnp::message::ReaderOptions::new()).map_err(|e| {
-            error!("{}: failed to deserialize response: {:?}", method_name, e);
-            RpcError::DeserializationFailed
-        })?;
-
-        // Get response root
-        let response = reader.get_root::<hello_capnp::rpc_response::Reader>().map_err(|e| {
-            error!("{}: failed to get root RpcResponse: {:?}", method_name, e);
-            RpcError::CapnpGetRootFailed
-        })?;
-
-        // Get result union and check for error
-        let result = response.get_result();
-        match result.which() {
-            Ok(hello_capnp::rpc_response::result::Error(err_text)) => {
-                let err = err_text.unwrap_or("unknown error");
-                error!("{}: server returned error: {}", method_name, err);
-                Err(RpcError::DeserializationFailed)
-            }
-            Ok(_) => {
-                // Delegate to method-specific extractor
-                extractor(result)
-            }
-            Err(e) => {
-                error!("{}: unexpected response type: {:?}", method_name, e);
-                Err(RpcError::InvalidMessageFormat)
-            }
-        }
+        self.serializer.deserialize_response(&response_bytes, method_name, extractor)
     }
 
     /// Call sayHello method

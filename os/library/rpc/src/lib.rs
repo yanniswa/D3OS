@@ -30,5 +30,6 @@ pub use pipe_transport::PipeTransport;
 // Load client modules from the `client/` folder and re-export `HelloClient`.
 pub mod client {
     pub mod client_stub;
+    pub mod serializer;
 }
 pub use client::client_stub::HelloClient;
