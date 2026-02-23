@@ -3,7 +3,7 @@
 extern crate alloc;
 use runtime::*;
 
-use log::{LevelFilter, SetLoggerError, info};
+use log::{LevelFilter, SetLoggerError, info, warn};
 use logger::Logger;
 use rpc::server::RpcServer;
 use rpc::server_pipe_transport::ServerPipeTransport;
@@ -22,12 +22,10 @@ pub fn init_logger() -> Result<(), SetLoggerError> {
 
 #[unsafe(no_mangle)]
 pub fn main() {
-    println!("rpc_server: starting");
-
     init_logger();
 
     info!("rpc_server: logger initialized *********");
-
+    info!("rpc_server: starting");
     let transport = match ServerPipeTransport::create(rpc::consts::REQUEST_PIPE_PATH) {
         Ok(t) => t,
         Err(e) => {
@@ -37,5 +35,5 @@ pub fn main() {
     };
     let mut server = RpcServer::with_transport(transport);
     let _ = server.run();
-    println!("rpc_server: ended");
+    warn!("rpc_server: ended, SHOULD NEVER OCCUR!!!!");
 }

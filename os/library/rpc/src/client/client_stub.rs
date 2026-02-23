@@ -49,12 +49,12 @@ static REPLY_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 ///
 /// That's it! All the boilerplate (serialization, transport, error handling) is handled
 /// by `call_method()` and `parse_response()`.
-pub struct HelloClient<T: ClientTransport> {
+pub struct HelloServiceClient<T: ClientTransport> {
     transport: T,
     serializer: RpcSerializer,
 }
 
-impl<T: ClientTransport> HelloClient<T> {
+impl<T: ClientTransport> HelloServiceClient<T> {
     pub fn new(transport: T) -> Self {
         Self {
             transport,

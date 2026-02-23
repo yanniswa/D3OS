@@ -1,7 +1,7 @@
 /// Cap'n Proto serialization layer for the RPC client.
 ///
 /// `RpcSerializer` is the single place in the client that knows about Cap'n Proto.
-/// `HelloClient` delegates every serialize/deserialize operation here so that
+/// `HelloServiceClient` delegates every serialize/deserialize operation here so that
 /// swapping the wire format only requires changing this file.
 extern crate alloc;
 
