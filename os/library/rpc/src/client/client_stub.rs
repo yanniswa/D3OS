@@ -2,7 +2,7 @@
 use crate::client::serializer::RpcSerializer;
 use crate::consts::MAX_RESPONSE_SIZE;
 use crate::error::RpcError;
-use crate::hello_capnp;
+use crate::schema_capnp;
 use crate::transport::ClientTransport;
 extern crate alloc;
 use alloc::format;
@@ -103,7 +103,7 @@ impl<T: ClientTransport> HelloClient<T> {
     /// * `F` - Function that extracts the result from the Cap'n Proto union
     fn parse_response<R, F>(&self, response_bytes: Vec<u8>, extractor: F, method_name: &str) -> Result<R, RpcError>
     where
-        F: FnOnce(hello_capnp::rpc_response::result::Reader) -> Result<R, RpcError>,
+        F: FnOnce(schema_capnp::rpc_response::result::Reader) -> Result<R, RpcError>,
     {
         self.serializer.deserialize_response(&response_bytes, method_name, extractor)
     }
@@ -114,7 +114,7 @@ impl<T: ClientTransport> HelloClient<T> {
 
         let response_bytes = self.call_method(
             |message, reply_path| {
-                let mut root = message.init_root::<hello_capnp::rpc_request::Builder>();
+                let mut root = message.init_root::<schema_capnp::rpc_request::Builder>();
                 root.set_reply_path(reply_path);
 
                 // Set method to sayHello with parameters
@@ -127,7 +127,7 @@ impl<T: ClientTransport> HelloClient<T> {
         self.parse_response(
             response_bytes,
             |result| match result.which() {
-                Ok(hello_capnp::rpc_response::result::SayHelloResult(r)) => {
+                Ok(schema_capnp::rpc_response::result::SayHelloResult(r)) => {
                     let reader = r.map_err(|_| RpcError::CapnpGetFieldFailed)?;
                     let greeting: Result<&str, _> = reader.get_greeting();
                     let greeting = greeting.unwrap_or("").to_string();
@@ -149,7 +149,7 @@ impl<T: ClientTransport> HelloClient<T> {
 
         let response_bytes = self.call_method(
             |message, reply_path| {
-                let mut root = message.init_root::<hello_capnp::rpc_request::Builder>();
+                let mut root = message.init_root::<schema_capnp::rpc_request::Builder>();
                 root.set_reply_path(reply_path);
 
                 // Set method to add with parameters
@@ -163,7 +163,7 @@ impl<T: ClientTransport> HelloClient<T> {
         self.parse_response(
             response_bytes,
             |result| match result.which() {
-                Ok(hello_capnp::rpc_response::result::AddResult(r)) => {
+                Ok(schema_capnp::rpc_response::result::AddResult(r)) => {
                     let reader = r.map_err(|_| RpcError::CapnpGetFieldFailed)?;
                     let sum: i32 = reader.get_sum();
                     debug!("add: received sum: {}", sum);

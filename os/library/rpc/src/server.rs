@@ -11,7 +11,7 @@ use concurrent::thread;
 use core::sync::atomic::{AtomicBool, Ordering};
 use log::{debug, error, info};
 
-use crate::hello_capnp;
+use crate::schema_capnp;
 
 pub struct RpcServer<T: ServerTransport> {
     transport: T,
@@ -72,17 +72,17 @@ impl<T: ServerTransport> RpcServer<T> {
             };
 
             // Dispatch the parsed Cap'n Proto message.
-            match message_reader.get_root::<hello_capnp::rpc_request::Reader>() {
+            match message_reader.get_root::<schema_capnp::rpc_request::Reader>() {
                 Ok(req) => {
                     let reply_path = req.get_reply_path().unwrap_or("");
                     match req.get_method().which() {
-                        Ok(hello_capnp::rpc_request::method::SayHello(params)) => match params {
+                        Ok(schema_capnp::rpc_request::method::SayHello(params)) => match params {
                             Ok(p) => {
                                 let name: &str = p.get_name().unwrap_or("unknown");
                                 debug!("RPC Request: sayHello('{}')", name);
                                 let greeting = handlers::say_hello(name);
                                 self.send_response(reply_path, |msg_builder| {
-                                    let response = msg_builder.init_root::<hello_capnp::rpc_response::Builder>();
+                                    let response = msg_builder.init_root::<schema_capnp::rpc_response::Builder>();
                                     let mut result = response.get_result().init_say_hello_result();
                                     result.set_greeting(&greeting);
                                 });
@@ -92,14 +92,14 @@ impl<T: ServerTransport> RpcServer<T> {
                                 self.send_error(reply_path, "Invalid sayHello parameters");
                             }
                         },
-                        Ok(hello_capnp::rpc_request::method::Add(params)) => match params {
+                        Ok(schema_capnp::rpc_request::method::Add(params)) => match params {
                             Ok(p) => {
                                 let a: i32 = p.get_a();
                                 let b: i32 = p.get_b();
                                 debug!("RPC Request: add({}, {})", a, b);
                                 let sum = handlers::add(a, b);
                                 self.send_response(reply_path, |msg_builder| {
-                                    let response = msg_builder.init_root::<hello_capnp::rpc_response::Builder>();
+                                    let response = msg_builder.init_root::<schema_capnp::rpc_response::Builder>();
                                     let mut result = response.get_result().init_add_result();
                                     result.set_sum(sum);
                                 });
@@ -147,7 +147,7 @@ impl<T: ServerTransport> RpcServer<T> {
     /// Helper function to send an error RPC response
     fn send_error(&self, reply_path: &str, error_msg: &str) {
         self.send_response(reply_path, |msg_builder| {
-            let response = msg_builder.init_root::<hello_capnp::rpc_response::Builder>();
+            let response = msg_builder.init_root::<schema_capnp::rpc_response::Builder>();
             response.get_result().set_error(error_msg);
         });
     }

@@ -11,7 +11,7 @@ use capnp::serialize;
 use log::error;
 
 use crate::error::RpcError;
-use crate::hello_capnp;
+use crate::schema_capnp;
 
 pub struct RpcSerializer;
 
@@ -43,7 +43,7 @@ impl RpcSerializer {
     /// `extractor` closure must produce an owned value.
     pub fn deserialize_response<R, F>(&self, response_bytes: &[u8], method_name: &str, extractor: F) -> Result<R, RpcError>
     where
-        F: FnOnce(hello_capnp::rpc_response::result::Reader) -> Result<R, RpcError>,
+        F: FnOnce(schema_capnp::rpc_response::result::Reader) -> Result<R, RpcError>,
     {
         let mut slice = response_bytes;
 
@@ -52,14 +52,14 @@ impl RpcSerializer {
             RpcError::DeserializationFailed
         })?;
 
-        let response = reader.get_root::<hello_capnp::rpc_response::Reader>().map_err(|e| {
+        let response = reader.get_root::<schema_capnp::rpc_response::Reader>().map_err(|e| {
             error!("{}: failed to get root RpcResponse: {:?}", method_name, e);
             RpcError::CapnpGetRootFailed
         })?;
 
         let result = response.get_result();
         match result.which() {
-            Ok(hello_capnp::rpc_response::result::Error(err_text)) => {
+            Ok(schema_capnp::rpc_response::result::Error(err_text)) => {
                 let err = err_text.unwrap_or("unknown error");
                 error!("{}: server returned error: {}", method_name, err);
                 Err(RpcError::DeserializationFailed)

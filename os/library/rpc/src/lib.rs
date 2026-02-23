@@ -1,8 +1,8 @@
 #![no_std]
 
 // Cap'n Proto generated code
-pub mod hello_capnp {
-    include!("./hello_capnp.rs");
+pub mod schema_capnp {
+    include!("../schema/schema_capnp.rs");
 }
 
 // Expose centralized constants
