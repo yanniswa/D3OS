@@ -213,12 +213,6 @@ let mut server = RpcServer::with_transport(transport);
 let _ = server.run(); // blocks until shutdown
 ```
 
-Or use the built-in convenience entry point which does the same in one call:
-
-```rust
-RpcServer::<ServerPipeTransport>::init(); // creates pipe + runs server
-```
-
 #### Calling methods from a client
 
 ```rust
